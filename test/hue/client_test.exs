@@ -177,6 +177,8 @@ defmodule Hue.ClientTest do
   end
 
   describe "from_bridge/2" do
+    @describetag :capture_log
+
     test "carries the bridge's identity, pin, and port across" do
       bridge = %Bridge.Info{
         host: "192.0.2.10",
@@ -232,9 +234,37 @@ defmodule Hue.ClientTest do
     test "is unverified when neither the bridge nor the caller has a pin" do
       bridge = %Bridge.Info{host: "192.0.2.10"}
 
-      {:ok, client} = Hue.from_bridge(bridge)
+      {{:ok, client}, _log} = ExUnit.CaptureLog.with_log(fn -> Hue.from_bridge(bridge) end)
 
       assert transport_options(client)[:verify] == :verify_none
+    end
+
+    # "Unverified and says so" should not mean "inspect the struct". A bridge
+    # that was never pinned is a downgrade to the trust level of every other
+    # Hue client, and it happens at the moment a client is built rather than at
+    # the moment a request fails.
+    test "says out loud that it is building an unverified client" do
+      bridge = %Bridge.Info{host: "192.0.2.10", bridge_id: "0011223344556677"}
+
+      log = ExUnit.CaptureLog.capture_log(fn -> Hue.from_bridge(bridge) end)
+
+      assert log =~ "192.0.2.10"
+      assert log =~ "will not verify"
+      assert log =~ "Hue.Discovery.identify/2"
+    end
+
+    test "says nothing when a pin is actually in force" do
+      bridge = %Bridge.Info{host: "192.0.2.10", fingerprint: @pin}
+
+      assert ExUnit.CaptureLog.capture_log(fn -> Hue.from_bridge(bridge) end) == ""
+    end
+
+    test "says nothing when the caller supplies the pin the bridge lacks" do
+      bridge = %Bridge.Info{host: "192.0.2.10"}
+
+      log = ExUnit.CaptureLog.capture_log(fn -> Hue.from_bridge(bridge, fingerprint: @pin) end)
+
+      assert log == ""
     end
 
     test "defaults the port to 443, as Bridge.Info does" do
@@ -394,6 +424,43 @@ defmodule Hue.ClientTransportTest do
 
       assert {:ok, response} = get(client)
       assert response.status == 200
+    end
+
+    # The pin firing is the most security-relevant thing this library can
+    # report, and it arrives wrapped in a TLS alert whose reason is a tuple.
+    # Hue.Resource used to raise FunctionClauseError on it outright.
+    test "a refused pin reaches Hue.Resource as :certificate_changed, not as a raise" do
+      {_other, wrong_fingerprint} = Hue.Certificates.bridge_certificate("FFFFFFFFFFFFFFFF")
+      port = Hue.Certificates.start_bridge_https_listener()
+
+      {:ok, client} =
+        Hue.new("127.0.0.1", port: port, fingerprint: wrong_fingerprint, retry: false)
+
+      assert {:error, %Hue.Error{reason: :certificate_changed} = error} =
+               Hue.Resource.list(client, :light)
+
+      assert Exception.message(error) =~ "certificate_changed"
+    end
+
+    test "a refused pin reaches Hue.Pairing as :certificate_changed too" do
+      {_other, wrong_fingerprint} = Hue.Certificates.bridge_certificate("FFFFFFFFFFFFFFFF")
+      port = Hue.Certificates.start_bridge_https_listener()
+
+      bridge = %Hue.Bridge.Info{host: "127.0.0.1", port: port, fingerprint: wrong_fingerprint}
+
+      assert {:error, %Hue.Error{reason: :certificate_changed}} =
+               Hue.Pairing.pair(bridge, retry: false)
+    end
+
+    test "an ordinary transport failure is still an ordinary transport failure" do
+      {:ok, socket} = :gen_tcp.listen(0, [])
+      {:ok, port} = :inet.port(socket)
+      :gen_tcp.close(socket)
+
+      {:ok, client} = Hue.new("127.0.0.1", port: port, retry: false)
+
+      assert {:error, %Hue.Error{reason: reason}} = Hue.Resource.list(client, :light)
+      assert reason in [:econnrefused, :timeout]
     end
   end
 

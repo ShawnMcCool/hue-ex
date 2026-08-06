@@ -15,6 +15,8 @@ defmodule Hue do
   no processes and holds no state between calls.
   """
 
+  require Logger
+
   alias Hue.Bridge
   alias Hue.Client
   alias Hue.Transport
@@ -114,7 +116,24 @@ defmodule Hue do
     end
   end
 
-  defp carry_pin!(options, %Bridge.Info{fingerprint: nil}), do: options
+  # A bridge with no fingerprint was never pinned, so a client built from it
+  # verifies nothing -- the trust level every other Hue client settles for.
+  # That is legitimate at first contact and nowhere else, and Hue.Discovery
+  # never returns such a bridge from a real connection, so reaching here
+  # generally means a hand-built Bridge.Info. It is said out loud because the
+  # alternative is a downgrade to unverified that is visible only by inspecting
+  # the struct, which is the failure mode this module exists to prevent.
+  defp carry_pin!(options, %Bridge.Info{fingerprint: nil} = bridge) do
+    unless Keyword.has_key?(options, :fingerprint) do
+      Logger.warning(
+        "Hue: #{bridge.host} has no pinned fingerprint, so this client will not verify the " <>
+          "bridge's certificate. Pin it with Hue.Discovery.identify/2, which captures the " <>
+          "fingerprint on first contact."
+      )
+    end
+
+    options
+  end
 
   defp carry_pin!(options, %Bridge.Info{fingerprint: pinned} = bridge) do
     case Keyword.fetch(options, :fingerprint) do

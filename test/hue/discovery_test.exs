@@ -65,9 +65,21 @@ defmodule Hue.DiscoveryTest do
       assert {:ok, bridge} = Discovery.identify("192.0.2.10", plug: {Req.Test, __MODULE__})
       refute bridge.fingerprint
 
-      # And the client built from it must be honest about being unverified.
-      {:ok, client} = Hue.from_bridge(bridge)
+      # And the client built from it must be honest about being unverified --
+      # in the struct and out loud.
+      {{:ok, client}, log} = ExUnit.CaptureLog.with_log(fn -> Hue.from_bridge(bridge) end)
       refute client.fingerprint
+      assert log =~ "will not verify"
+    end
+
+    test "a stub cannot conjure a pin, but a caller-supplied one is carried through" do
+      stub_config(%{"bridgeid" => "0011223344556677", "modelid" => "BSB002"})
+      pin = String.duplicate("ab", 32)
+
+      assert {:ok, bridge} =
+               Discovery.identify("192.0.2.10", plug: {Req.Test, __MODULE__}, fingerprint: pin)
+
+      assert bridge.fingerprint == pin
     end
 
     test "reports a 200 that is not a bridge at all" do
@@ -182,6 +194,21 @@ defmodule Hue.DiscoveryTest do
                Discovery.identify("127.0.0.1", port: port, timeout: 1_000, retry: false)
 
       assert reason in [:econnrefused, :timeout]
+    end
+
+    # :receive_timeout bounds waiting for a response, not connecting and
+    # handshaking. Before the connect phase was bounded too, a 1000ms budget
+    # here took 5115ms, governed by Finch's five-second default.
+    test "stays inside its budget when the connection after the capture is black-holed" do
+      port = Certificates.start_stalling_bridge_listener()
+
+      {elapsed, result} =
+        :timer.tc(fn ->
+          Discovery.identify("127.0.0.1", port: port, timeout: 500, retry: false)
+        end)
+
+      assert {:error, %Hue.Error{}} = result
+      assert div(elapsed, 1_000) < 2_000
     end
 
     test "the v1 bridge is rejected even when its certificate pins cleanly" do
@@ -361,7 +388,106 @@ defmodule Hue.DiscoveryTest do
     end
   end
 
+  describe "query_packet/0" do
+    test "asks one PTR question for the Hue service" do
+      assert {:ok, message} = :inet_dns.decode(Discovery.query_packet())
+
+      assert [question] = :inet_dns.msg(message, :qdlist)
+      assert :inet_dns.dns_query(question, :domain) == @service
+      assert :inet_dns.dns_query(question, :type) == :ptr
+      assert :inet_dns.dns_query(question, :class) == :in
+    end
+
+    test "is a query, not a response" do
+      {:ok, message} = :inet_dns.decode(Discovery.query_packet())
+      header = :inet_dns.msg(message, :header)
+
+      refute :inet_dns.header(header, :qr)
+      assert :inet_dns.header(header, :opcode) == :query
+    end
+  end
+
+  describe "collect_answers/2" do
+    test "reads the addresses out of the answers it receives" do
+      socket = open_socket()
+
+      send_to(socket, mdns_response(a_records: [{@target, {192, 0, 2, 10}}]))
+      send_to(socket, mdns_response(a_records: [{@target, {192, 0, 2, 11}}]))
+
+      found = Discovery.collect_answers(socket, 300)
+
+      assert Enum.map(found, & &1.host) |> Enum.sort() == ["192.0.2.10", "192.0.2.11"]
+      assert Enum.all?(found, &(&1.discovered_by == :mdns))
+    end
+
+    test "deduplicates a host that several packets name" do
+      socket = open_socket()
+      packet = mdns_response(a_records: [{@target, {192, 0, 2, 10}}])
+
+      for _ <- 1..5, do: send_to(socket, packet)
+
+      assert [%Bridge.Info{host: "192.0.2.10"}] = Discovery.collect_answers(socket, 300)
+    end
+
+    # The bug this replaced restarted the timeout on every packet, so a
+    # steady trickle of them extended the budget without bound.
+    test "the budget is absolute, not per packet" do
+      socket = open_socket()
+      packet = mdns_response(a_records: [{@target, {192, 0, 2, 10}}])
+
+      flooder =
+        spawn_link(fn ->
+          Stream.repeatedly(fn -> send_to(socket, packet) end) |> Enum.take(5_000)
+        end)
+
+      {elapsed, found} = :timer.tc(fn -> Discovery.collect_answers(socket, 200) end)
+      Process.unlink(flooder)
+      Process.exit(flooder, :kill)
+
+      assert [%Bridge.Info{host: "192.0.2.10"}] = found
+      assert div(elapsed, 1_000) < 1_000
+    end
+
+    test "an exhausted budget returns what it already had" do
+      socket = open_socket()
+
+      assert Discovery.collect_answers(socket, 0) == []
+    end
+
+    test "ignores packets that are not DNS at all" do
+      socket = open_socket()
+
+      send_to(socket, "this is not a dns packet")
+      send_to(socket, mdns_response(a_records: [{@target, {192, 0, 2, 10}}]))
+
+      assert [%Bridge.Info{host: "192.0.2.10"}] = Discovery.collect_answers(socket, 300)
+    end
+  end
+
   describe "discover/1" do
+    # The multicast path itself: opening the socket, sending the query, running
+    # the collection to its deadline, closing. A responder may or may not exist
+    # on the machine running this, so the assertions are about shape and time,
+    # and the stub catches any candidate a real bridge might contribute rather
+    # than letting the suite reach the network.
+    test "the multicast path runs end to end and stays inside its budget" do
+      stub_config(%{"bridgeid" => "0011223344556677", "modelid" => "BSB002"})
+
+      {elapsed, result} =
+        :timer.tc(fn ->
+          Discovery.discover(
+            cloud: false,
+            timeout: 200,
+            plug: {Req.Test, __MODULE__},
+            retry: false
+          )
+        end)
+
+      assert {:ok, bridges} = result
+      assert Enum.all?(bridges, &(&1.discovered_by == :mdns))
+      assert div(elapsed, 1_000) < 3_000
+    end
+
     test "does no network work at all when both methods are disabled" do
       assert {:ok, []} = Discovery.discover(mdns: false, cloud: false)
     end
@@ -426,6 +552,22 @@ defmodule Hue.DiscoveryTest do
                  timeout: 1_000
                )
     end
+  end
+
+  # An ordinary unicast socket standing in for the multicast one. Nothing in
+  # collect_answers/2 cares how the packets arrived, which is the point of it
+  # taking an already-open socket.
+  defp open_socket do
+    {:ok, socket} = :gen_udp.open(0, [:binary, active: false])
+    on_exit(fn -> :gen_udp.close(socket) end)
+    socket
+  end
+
+  defp send_to(socket, packet) do
+    {:ok, port} = :inet.port(socket)
+    {:ok, sender} = :gen_udp.open(0, [:binary, active: false])
+    :gen_udp.send(sender, {127, 0, 0, 1}, port, packet)
+    :gen_udp.close(sender)
   end
 
   defp stub_config(body) do

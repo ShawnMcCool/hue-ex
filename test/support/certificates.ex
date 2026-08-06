@@ -151,6 +151,56 @@ defmodule Hue.Certificates do
     port
   end
 
+  @doc """
+  Runs a TLS listener that completes exactly one handshake and then black-holes
+  everything after it, and returns its port.
+
+  The first connection behaves normally, so a certificate can be captured from
+  it. Every later connection is accepted at the TCP level and then never spoken
+  to — no handshake, no response, no close — which is the shape a host takes
+  when something drops the traffic mid-flight rather than refusing it. It is the
+  case that exposes whether a timeout budget actually covers connecting and
+  handshaking, or only covers waiting for a response.
+  """
+  def start_stalling_bridge_listener(common_name \\ "0011223344556677") do
+    {:ok, listen} =
+      :ssl.listen(0,
+        cert: der(common_name),
+        key: {:PrivateKeyInfo, key(common_name)},
+        reuseaddr: true,
+        active: false,
+        packet: :raw,
+        mode: :binary
+      )
+
+    {:ok, {_address, port}} = :ssl.sockname(listen)
+
+    acceptor =
+      spawn(fn ->
+        with {:ok, pending} <- :ssl.transport_accept(listen, 5000) do
+          :ssl.handshake(pending, 5000)
+        end
+
+        stall(listen, [])
+      end)
+
+    ExUnit.Callbacks.on_exit(fn ->
+      Process.exit(acceptor, :kill)
+      :ssl.close(listen)
+    end)
+
+    port
+  end
+
+  # The accepted sockets are kept referenced so nothing closes them early. A
+  # closed socket is a refusal, which is the opposite of the case being staged.
+  defp stall(listen, held) do
+    case :ssl.transport_accept(listen, 30_000) do
+      {:ok, pending} -> stall(listen, [pending | held])
+      {:error, _reason} -> stall(listen, held)
+    end
+  end
+
   defp response(options) do
     body = Keyword.get(options, :body, @default_body)
     {code, reason} = Keyword.get(options, :status, {200, "OK"})

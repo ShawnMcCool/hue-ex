@@ -53,7 +53,13 @@ defmodule Hue.Discovery do
   Pass `:plug` (or `:adapter`) and no TLS handshake happens, so there is no
   certificate to capture and none is invented: the returned bridge has
   `fingerprint: nil`, and a client built from it is unverified and says so.
-  A stubbed `identify/2` never looks like a successful pin.
+  Nothing a stub can put on the wire produces a pin.
+
+  A `:fingerprint` passed alongside a stub is still carried onto the result,
+  because that is a value the caller supplied rather than one this library
+  concluded from a stubbed connection. It is the same option `identify/2`
+  documents for re-checking an already-trusted bridge, and it is not
+  attacker-controllable.
   """
 
   require Logger
@@ -69,7 +75,7 @@ defmodule Hue.Discovery do
   @default_timeout 5_000
   @default_port 443
   @task_grace 1_000
-  @identify_phases 2
+  @identify_phases 3
   @v1_model "BSB001"
   @config_path "/api/config"
 
@@ -96,9 +102,15 @@ defmodule Hue.Discovery do
 
     * `:cloud` — set `false` to skip the cloud endpoint. Defaults to `true`.
     * `:mdns` — set `false` to skip multicast. Defaults to `true`.
-    * `:timeout` — per-method budget in milliseconds. Defaults to
-      `#{@default_timeout}`. It is a real budget: mDNS collects answers until it
-      expires and then stops, rather than restarting the clock per packet.
+    * `:timeout` — the budget in milliseconds for **one phase of one thing**.
+      Defaults to `#{@default_timeout}`. It bounds mDNS collection as a whole —
+      answers are collected until an absolute deadline rather than restarting
+      the clock per packet — and it bounds each of `identify/2`'s
+      `#{@identify_phases}` phases. It is not a wall-clock ceiling on
+      `discover/1`: finding runs concurrently with a budget of its own, and
+      confirmation follows it, so a run against candidates that all stall takes
+      roughly `#{@identify_phases + 1}` times the budget. Candidates are
+      confirmed concurrently, so their number does not extend it.
 
   Every other option is forwarded to `identify/2`, and from there to `Hue.new/2`
   and `Req.new/1`.
@@ -143,10 +155,13 @@ defmodule Hue.Discovery do
 
     * `:port` — defaults to `#{@default_port}`.
     * `:timeout` — milliseconds allowed per phase, of which there are
-      `#{@identify_phases}`: capturing the certificate, and the request. Defaults
-      to `#{@default_timeout}`. It sets `:receive_timeout` unless the caller set
-      one, so `identify/2` is bounded overall rather than bounded only where it
-      opens the socket itself.
+      `#{@identify_phases}`: capturing the certificate, connecting and
+      handshaking for the request, and waiting for the response. Defaults to
+      `#{@default_timeout}`, so the worst case is that many times the budget.
+      It sets `:receive_timeout` and `connect_options[:timeout]` unless the
+      caller set them, because between them those are what bound the request —
+      `:receive_timeout` alone leaves connecting and the handshake on Finch's
+      five-second default, which ignores the budget entirely.
     * `:discovered_by` — recorded on the result. Defaults to `:manual`.
     * `:fingerprint` — an already-trusted pin. Given one, no certificate is
       captured and no trust decision is made: the request is pinned to it and
@@ -168,7 +183,7 @@ defmodule Hue.Discovery do
     {mine, client_options} = Keyword.split(options, @identify_options)
     port = Keyword.get(mine, :port, @default_port)
     timeout = Keyword.get(mine, :timeout, @default_timeout)
-    client_options = Keyword.put_new(client_options, :receive_timeout, timeout)
+    client_options = bound_by(client_options, timeout)
 
     with {:ok, fingerprint, common_name} <- pin(host, port, timeout, client_options) do
       candidate = %{
@@ -233,7 +248,10 @@ defmodule Hue.Discovery do
 
   def identity_agrees?(common_name, bridge_id)
       when is_binary(common_name) and is_binary(bridge_id) do
-    String.upcase(common_name) == String.upcase(bridge_id)
+    # :ascii, not full Unicode folding. String.upcase/1 expands U+FB00 to "FF",
+    # so "001788\uFB00feae1b58" would equal "001788FFFEAE1B58" -- a comparison
+    # that claims to be about hex should be about hex.
+    String.upcase(common_name, :ascii) == String.upcase(bridge_id, :ascii)
   end
 
   @doc """
@@ -293,6 +311,68 @@ defmodule Hue.Discovery do
     end
   end
 
+  @doc """
+  The mDNS query this library multicasts: one PTR question for
+  `#{@mdns_service}`. Pure.
+
+  Built with `:inet_dns`'s `make_*` constructors rather than as positional
+  tuples. The record shapes are undocumented and they move: on OTP 28
+  `dns_header` carries nine fields and `dns_query` four, so the tuples this was
+  first written with raise `FunctionClauseError`. The constructors are the only
+  form that does not have to be re-verified against every release.
+  """
+  @spec query_packet() :: binary()
+  def query_packet do
+    :inet_dns.encode(
+      :inet_dns.make_msg(
+        header: :inet_dns.make_header(id: 0, qr: false, opcode: :query, rd: false),
+        qdlist: [:inet_dns.make_dns_query(domain: @mdns_service, type: :ptr, class: :in)]
+      )
+    )
+  end
+
+  @doc """
+  Reads mDNS answers from an already-open UDP socket until `timeout`
+  milliseconds have passed, and returns what they name.
+
+  `timeout` is a budget for the whole collection, not for each receive. The
+  deadline is absolute for that reason: a responder answers across several
+  packets, and restarting the clock on each one turns a 5s budget into 5s *per
+  packet*, with no bound on the total.
+
+  Separate from the socket that sends the query so that the collection loop can
+  be driven over an ordinary unicast socket, which is the only way to test it
+  without standing up a multicast responder.
+  """
+  @spec collect_answers(:gen_udp.socket(), non_neg_integer()) :: [Bridge.Info.t()]
+  def collect_answers(socket, timeout) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+
+    socket
+    |> collect(deadline, [])
+    |> Enum.map(&%Bridge.Info{host: &1, discovered_by: :mdns})
+  end
+
+  defp collect(socket, deadline, found) do
+    remaining = deadline - System.monotonic_time(:millisecond)
+
+    if remaining <= 0 do
+      Enum.uniq(found)
+    else
+      receive_packet(socket, deadline, found, remaining)
+    end
+  end
+
+  defp receive_packet(socket, deadline, found, remaining) do
+    case :gen_udp.recv(socket, 0, remaining) do
+      {:ok, {_address, _port, packet}} ->
+        collect(socket, deadline, found ++ parse_mdns_packet(packet))
+
+      {:error, _reason} ->
+        Enum.uniq(found)
+    end
+  end
+
   # -- first contact ---------------------------------------------------------
 
   defp pin(host, port, timeout, client_options) do
@@ -312,6 +392,24 @@ defmodule Hue.Discovery do
 
   defp stubbed?(client_options) do
     Enum.any?(@stub_options, &Keyword.has_key?(client_options, &1))
+  end
+
+  # Both halves of the request need bounding, and they are bounded by different
+  # options. `:receive_timeout` covers waiting for a response and nothing else;
+  # connecting and the TLS handshake are governed by `connect_options[:timeout]`,
+  # which defaults to Finch's five seconds and would otherwise ignore the budget
+  # entirely — a host that accepts the connection and then says nothing is
+  # exactly the case where that shows.
+  #
+  # Both are `put_new`, so a caller who set either keeps it. `:connect_options`
+  # is left untouched if it is not a keyword list, so `Hue.new/2` still raises
+  # its own ArgumentError about it rather than a FunctionClauseError from here.
+  defp bound_by(client_options, timeout) do
+    client_options
+    |> Keyword.put_new(:receive_timeout, timeout)
+    |> Keyword.update(:connect_options, [timeout: timeout], fn given ->
+      if Keyword.keyword?(given), do: Keyword.put_new(given, :timeout, timeout), else: given
+    end)
   end
 
   # -- the pinned /api/config request ----------------------------------------
@@ -347,12 +445,8 @@ defmodule Hue.Discovery do
     {:error, Error.from_response(response.status, response.body, content_type(response))}
   end
 
-  defp interpret({:error, %{reason: reason}}, _candidate) when is_atom(reason) do
-    {:error, Error.transport(reason)}
-  end
-
   defp interpret({:error, exception}, _candidate) do
-    {:error, Error.transport(:unknown, description: Exception.message(exception))}
+    {:error, Error.from_transport(exception)}
   end
 
   defp configured(%{"modelid" => @v1_model}, _candidate) do
@@ -440,50 +534,12 @@ defmodule Hue.Discovery do
   defp query(socket, timeout) do
     case :gen_udp.send(socket, @mdns_address, @mdns_port, query_packet()) do
       :ok ->
-        deadline = System.monotonic_time(:millisecond) + timeout
-        socket |> collect(deadline, []) |> Enum.map(&%Bridge.Info{host: &1, discovered_by: :mdns})
+        collect_answers(socket, timeout)
 
       {:error, reason} ->
         Logger.debug("Hue.Discovery: could not send the multicast query: #{inspect(reason)}")
         []
     end
-  end
-
-  # `:timeout` is a budget for the whole collection, not for each receive. The
-  # deadline is absolute for that reason: answers arrive in several packets, and
-  # restarting the clock on each one turns a 5s budget into 5s per packet with no
-  # bound on the total.
-  defp collect(socket, deadline, found) do
-    remaining = deadline - System.monotonic_time(:millisecond)
-
-    if remaining <= 0 do
-      Enum.uniq(found)
-    else
-      receive_packet(socket, deadline, found, remaining)
-    end
-  end
-
-  defp receive_packet(socket, deadline, found, remaining) do
-    case :gen_udp.recv(socket, 0, remaining) do
-      {:ok, {_address, _port, packet}} ->
-        collect(socket, deadline, found ++ parse_mdns_packet(packet))
-
-      {:error, _reason} ->
-        Enum.uniq(found)
-    end
-  end
-
-  # The record shapes changed between OTP releases — on OTP 28 `dns_header` has
-  # nine fields and `dns_query` four — so these are built with the `make_*`
-  # constructors rather than as positional tuples, which is the only form that
-  # does not have to be re-verified against each release.
-  defp query_packet do
-    :inet_dns.encode(
-      :inet_dns.make_msg(
-        header: :inet_dns.make_header(id: 0, qr: false, opcode: :query, rd: false),
-        qdlist: [:inet_dns.make_dns_query(domain: @mdns_service, type: :ptr, class: :in)]
-      )
-    )
   end
 
   # -- plumbing --------------------------------------------------------------
@@ -572,13 +628,11 @@ defmodule Hue.Discovery do
   defp address_to_string(_other), do: nil
 
   defp upcase(nil), do: nil
-  defp upcase(id) when is_binary(id), do: String.upcase(id)
+  defp upcase(id) when is_binary(id), do: String.upcase(id, :ascii)
 
-  defp transport_error(reason) when is_atom(reason), do: Error.transport(reason)
-
-  defp transport_error(reason) do
-    Error.transport(:unknown, description: inspect(reason))
-  end
+  # :ssl.connect/4 reports a bare reason rather than an exception, so it is
+  # shaped like one to reach the same normalisation every other path uses.
+  defp transport_error(reason), do: Error.from_transport(%{reason: reason})
 
   defp content_type(response) do
     case Req.Response.get_header(response, "content-type") do
