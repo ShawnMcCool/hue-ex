@@ -81,7 +81,7 @@ defmodule Hue.MixProject do
       source_ref: "v#{@version}",
       groups_for_modules: [
         Core: [Hue, Hue.Client, Hue.Resource, Hue.Error],
-        Setup: [Hue.Discovery, Hue.Bridge.Info, Hue.Pairing, Hue.Transport],
+        Setup: [Hue.Discovery, Hue.Bridge, Hue.Bridge.Info, Hue.Pairing, Hue.Transport],
         Events: [Hue.Events, Hue.Event],
         Colour: [Hue.Color, Hue.Color.Gamut]
       ]
