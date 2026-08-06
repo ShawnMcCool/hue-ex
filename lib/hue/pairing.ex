@@ -176,11 +176,8 @@ defmodule Hue.Pairing do
       {:ok, %Req.Response{status: status, body: raw_body} = response} ->
         {:error, Error.from_response(status, raw_body, content_type(response))}
 
-      {:error, %{reason: reason}} ->
-        {:error, Error.transport(reason)}
-
       {:error, exception} ->
-        {:error, Error.transport(:unknown, description: Exception.message(exception))}
+        {:error, Error.from_transport(exception)}
     end
   end
 

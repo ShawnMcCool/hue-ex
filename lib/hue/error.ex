@@ -72,6 +72,11 @@ defmodule Hue.Error do
 
   @pairing_types %{101 => :link_button_not_pressed}
 
+  # The complete set of terms Hue.Transport.verify_pinned/4 fails with. Kept as
+  # strings because that is the form they come back in, and matched exactly so
+  # nothing else can be mistaken for them. See from_transport/1.
+  @verify_fun_reasons ~w(certificate_changed unexpected_verification_event)
+
   @doc """
   Builds an error from a CLIP v2 response.
 
@@ -115,6 +120,68 @@ defmodule Hue.Error do
   @spec transport(atom(), keyword()) :: t()
   def transport(reason, opts \\ []) when is_atom(reason) do
     %__MODULE__{reason: reason, description: opts[:description]}
+  end
+
+  @doc """
+  Builds an error from whatever Req handed back in an `{:error, _}`.
+
+  Every request path in this library goes through here, because the reason Req
+  carries is not always an atom, and the one case where it is not is the most
+  security-relevant failure the library can report.
+
+  ## Why the pin needs unwrapping
+
+  When `Hue.Transport.verify_pinned/4` refuses a certificate it returns
+  `{:fail, :certificate_changed}`. `:ssl` turns that into a fatal alert, and
+  Mint surfaces it as `%Mint.TransportError{reason: {:tls_alert,
+  {:handshake_failure, text}}}` — a **tuple**. Handed to `transport/2` that
+  raises `FunctionClauseError`; guarded away with `is_atom` it degrades to
+  `:unknown`. Either way the one failure `Hue.Transport` documents as "your
+  bridge was replaced or you are being intercepted" never reaches a caller in
+  a form they can match on.
+
+  OTP appends the refused term to the alert text on a line of its own, so the
+  original reason is recoverable, and the two terms this library's `verify_fun`
+  can fail with are mapped back to themselves.
+
+  ## Why the match is narrow
+
+  Reporting a benign failure as an interception is the same class of mistake as
+  reporting a differently-formatted fingerprint as one. So the trailing line
+  must **equal** one of those terms rather than merely contain it, and every
+  other alert stays `:unknown` with its text intact. A server-sent
+  `protocol_version` or `insufficient_security`, and a `handshake_failure`
+  carrying any other term — `hostname_check_failed` and `cert_expired` both
+  arrive through this same wrapping — are negotiation or certificate problems,
+  not evidence that anything was swapped.
+  """
+  @spec from_transport(Exception.t() | %{reason: term()}) :: t()
+  def from_transport(%{reason: {:tls_alert, {_type, text}}}) do
+    description = List.to_string(text)
+
+    %__MODULE__{reason: refused_term(description), description: description}
+  end
+
+  def from_transport(%{reason: reason}) when is_atom(reason) do
+    %__MODULE__{reason: reason}
+  end
+
+  def from_transport(%{reason: reason}) do
+    %__MODULE__{reason: :unknown, description: inspect(reason)}
+  end
+
+  def from_transport(exception) do
+    %__MODULE__{reason: :unknown, description: Exception.message(exception)}
+  end
+
+  defp refused_term(description) do
+    refused = description |> String.split("\n") |> List.last() |> String.trim()
+
+    if refused in @verify_fun_reasons do
+      String.to_existing_atom(refused)
+    else
+      :unknown
+    end
   end
 
   defp describe(body, "application/json" <> _) when is_binary(body) and body != "" do
