@@ -4,9 +4,19 @@ defmodule Hue.Certificates do
 
   A bridge certificate is unusual in exactly one way that matters here: the
   common name is the bridge id, and there is **no subjectAltName at all**. These
-  fixtures reproduce that shape — `C=NL, O=Philips Hue, CN=<bridge id>`,
-  self-signed, no SAN — so the pinning path is exercised against the condition it
-  exists to handle.
+  fixtures reproduce that shape — `C=NL, O=Philips Hue, CN=<bridge id>`, no SAN —
+  so the pinning path is exercised against the condition it exists to handle.
+
+  Two issuing shapes are covered, because they take different branches:
+
+    * **self-signed** (`0011223344556677`, `00AABBCCDDEEFF00`, `FFFFFFFFFFFFFFFF`)
+      arrives as `{:bad_cert, :selfsigned_peer}`.
+    * **signed by an absent authority** (`00178800AABBCCDD`, issued by
+      `CN=root-bridge`) arrives as `{:bad_cert, :unknown_ca}`. This is the real
+      hardware shape: the issuer exists but is never sent and cannot be
+      downloaded, so `bridge_issuing_ca.der` is deliberately kept out of the
+      trust store in every test but the one that studies what happens when a CA
+      *is* supplied.
 
   They are generated once with `openssl` and committed as DER, rather than
   assembled from ASN.1 records at runtime. Hand-built records track OTP's
@@ -21,9 +31,9 @@ defmodule Hue.Certificates do
   not from `Hue.Transport`, so the fingerprint test compares against an
   independent implementation instead of restating the one under test.
 
-  `bridge_0011223344556677.key.der` is the matching private key, so the pinning
-  tests can stand up a real TLS listener and prove the handshake behaves. It is a
-  throwaway test key for a certificate no bridge will ever present.
+  The `.key.der` files are the matching private keys, so the pinning tests can
+  stand up a real TLS listener and prove the handshake behaves. They are
+  throwaway test keys for certificates no bridge will ever present.
   """
 
   @dir Path.join(__DIR__, "fixtures/certificates")
@@ -32,7 +42,9 @@ defmodule Hue.Certificates do
     "0011223344556677" => "21cdf48f5217f21923a498576d01c31d800424dafef70efc259f1e05134f3274",
     "00AABBCCDDEEFF00" => "48fb79eeb1a24847b67340475d7d9d260847b7f3361d57587c761ae9f17d8f22",
     "FFFFFFFFFFFFFFFF" => "19b0176ff5be4461cf15626db089ad5ce1af401f6cc5798055522a9a04d466e1",
-    "without_common_name" => "bc12a3a5645be5d4a1e7a9d31cf0c23110674a32ec50812507dcc5bfd94ed5df"
+    "without_common_name" => "bc12a3a5645be5d4a1e7a9d31cf0c23110674a32ec50812507dcc5bfd94ed5df",
+    "00178800AABBCCDD" => "0d585fec48bcae4b016282f20109cc2426974233fb1bad27f3e7735daad09f96",
+    "issuing_ca" => "4a3ebb0279038149982a93704ba5d5100eb1ddf9fafe138ec822bdf437174aed"
   }
 
   @doc "Returns `{der, fingerprint}` for the certificate with the given common name."
@@ -45,23 +57,29 @@ defmodule Hue.Certificates do
     File.read!(Path.join(@dir, "bridge_#{common_name}.der"))
   end
 
+  @doc "The private key of the certificate with the given common name, as DER."
+  def key(common_name) do
+    File.read!(Path.join(@dir, "bridge_#{common_name}.key.der"))
+  end
+
   @doc """
   The same certificate decoded into the `OTPCertificate` record that OTP's
-  `:ssl` hands to a `verify_fun`.
+  `:ssl` hands to a `verify_fun` alongside the DER.
   """
   def otp_certificate(common_name \\ "0011223344556677") do
     :public_key.pkix_decode_cert(der(common_name), :otp)
   end
 
   @doc """
-  Runs a one-shot TLS listener presenting the bridge certificate and returns its
-  port. The listener serves a single handshake and then goes away with the test.
+  Runs a one-shot TLS listener presenting the given bridge certificate and
+  returns its port. The listener serves a single handshake and then goes away
+  with the test.
   """
-  def start_bridge_listener do
+  def start_bridge_listener(common_name \\ "0011223344556677") do
     {:ok, listen} =
       :ssl.listen(0,
-        cert: der("0011223344556677"),
-        key: {:PrivateKeyInfo, File.read!(Path.join(@dir, "bridge_0011223344556677.key.der"))},
+        cert: der(common_name),
+        key: {:PrivateKeyInfo, key(common_name)},
         reuseaddr: true,
         active: false
       )
