@@ -90,10 +90,13 @@ defmodule Hue.Error do
   @doc """
   Builds an error from the v1 pairing envelope, which arrives at HTTP 200.
 
-  Raises `FunctionClauseError` unless the body is error-shaped (a list headed by
-  an `"error"` entry, or a map with a `"type"` key). Callers must route on
-  `"error"` versus `"success"` before calling this — it is not safe to call
-  unconditionally on a pairing response.
+  Requires the body to be a list whose first element is
+  `%{"error" => %{"type" => integer}}` — not merely a list with an `"error"`
+  key present. An `"error"` value with no `"type"`, a non-map `"error"`
+  value, an empty list, or a body that is not a list at all all raise
+  `FunctionClauseError`. Checking for the presence of an `"error"` key is
+  necessary but not sufficient before calling this; callers must confirm the
+  full shape, not just route on `"error"` versus `"success"`.
   """
   @spec from_pairing(list() | map()) :: t()
   def from_pairing([%{"error" => error} | _]), do: from_pairing(error)

@@ -66,8 +66,10 @@ defmodule Hue.Pairing do
 
   ## Options
 
-    * `:app` — identifies this pairing in `device_type/1`, e.g. the name of
-      the application asking. Defaults to `#{inspect(@default_app)}`.
+    * `:app` — a binary identifying this pairing in `device_type/1`, e.g. the
+      name of the application asking. Defaults to `#{inspect(@default_app)}`.
+      A non-binary raises `FunctionClauseError` from `device_type/1` — that
+      is a caller bug, not a bridge response, so it is not caught.
 
   Every other option is forwarded to `Hue.new/2` (and from there to
   `Req.new/1`), so `:plug`, `:connect_options`, `:receive_timeout`, `:retry`,
@@ -193,7 +195,8 @@ defmodule Hue.Pairing do
     {:ok, %{application_key: success["username"], clientkey: success["clientkey"]}}
   end
 
-  defp interpret([%{"error" => _} | _] = body), do: {:error, Error.from_pairing(body)}
+  defp interpret([%{"error" => %{"type" => _}} | _] = body),
+    do: {:error, Error.from_pairing(body)}
 
   defp interpret(body) do
     {:error, Error.transport(:unexpected_response, description: inspect(body))}

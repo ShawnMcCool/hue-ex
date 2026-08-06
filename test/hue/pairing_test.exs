@@ -98,6 +98,37 @@ defmodule Hue.PairingTest do
              Pairing.pair(bridge, plug: {Req.Test, __MODULE__})
   end
 
+  # An "error" key alone is not enough to hand the body to
+  # Hue.Error.from_pairing/1 — it also requires a "type". This is the
+  # plausible-firmware case: a future or unusual bridge response that carries
+  # a description but no numeric type must not crash the caller.
+  test "pair/2 falls back rather than raising on an error with no type", %{bridge: bridge} do
+    Req.Test.stub(__MODULE__, fn conn ->
+      Req.Test.json(conn, [%{"error" => %{"description" => "something went wrong"}}])
+    end)
+
+    assert {:error, %Error{reason: :unexpected_response}} =
+             Pairing.pair(bridge, plug: {Req.Test, __MODULE__})
+  end
+
+  test "pair/2 falls back rather than raising on a non-map error value", %{bridge: bridge} do
+    Req.Test.stub(__MODULE__, fn conn ->
+      Req.Test.json(conn, [%{"error" => "oops"}])
+    end)
+
+    assert {:error, %Error{reason: :unexpected_response}} =
+             Pairing.pair(bridge, plug: {Req.Test, __MODULE__})
+  end
+
+  test "pair/2 falls back rather than raising on an error-shaped bare map", %{bridge: bridge} do
+    Req.Test.stub(__MODULE__, fn conn ->
+      Req.Test.json(conn, %{"error" => %{"type" => 101}})
+    end)
+
+    assert {:error, %Error{reason: :unexpected_response}} =
+             Pairing.pair(bridge, plug: {Req.Test, __MODULE__})
+  end
+
   test "pair/2 does not silently drop TLS pinning when a caller supplies connect_options", %{
     bridge: bridge
   } do
