@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+"""Sanitize a recorded Hue full-state dump into a publishable fixture.
+
+Preserves everything that matters for testing — resource types, capability
+spread, gamut types, the empty-room edge case, reference topology — while
+replacing anything that identifies a real home or bridge.
+"""
+import json, hashlib, re, sys
+
+SRC, DST = sys.argv[1], sys.argv[2]
+doc = json.load(open(SRC))
+
+FAKE_BRIDGE_ID = "0011223344556677"
+FAKE_MAC = "00:11:22:33:44:55"
+
+# Deterministic synthetic UUIDs, so fixtures are stable across regeneration.
+_uuid_map = {}
+def fake_uuid(real):
+    if real not in _uuid_map:
+        h = hashlib.sha256(("hue-ex/" + real).encode()).hexdigest()
+        _uuid_map[real] = f"{h[0:8]}-{h[8:12]}-{h[12:16]}-{h[16:20]}-{h[20:32]}"
+    return _uuid_map[real]
+
+# Generic names per type, assigned in first-seen order.
+_name_map, _counters = {}, {}
+LABEL = {"room": "Room", "zone": "Zone", "scene": "Scene", "device": "Device",
+         "light": "Light", "button": "Switch"}
+def fake_name(real, rtype):
+    key = (rtype, real)
+    if key not in _name_map:
+        n = _counters.get(rtype, 0) + 1
+        _counters[rtype] = n
+        _name_map[key] = f"{LABEL.get(rtype, rtype.title())} {n}"
+    return _name_map[key]
+
+UUID_RE = re.compile(r"^[0-9a-f]{8}-([0-9a-f]{4}-){3}[0-9a-f]{12}$")
+
+def walk(node, rtype=None):
+    if isinstance(node, dict):
+        out = {}
+        for k, v in node.items():
+            if k in ("rid", "id") and isinstance(v, str) and UUID_RE.match(v):
+                out[k] = fake_uuid(v)
+            elif k == "metadata" and isinstance(v, dict) and "name" in v:
+                v = dict(v); v["name"] = fake_name(v["name"], rtype or "resource")
+                out[k] = walk(v, rtype)
+            elif k in ("mac_address", "bridge_id", "owner_bridge_id"):
+                out[k] = FAKE_MAC if "mac" in k else FAKE_BRIDGE_ID
+            elif k == "ip_address":
+                out[k] = "192.0.2.10"          # TEST-NET-1, RFC 5737
+            elif k == "latitude" or k == "longitude":
+                out[k] = 0.0
+            else:
+                out[k] = walk(v, rtype)
+        return out
+    if isinstance(node, list):
+        return [walk(x, rtype) for x in node]
+    return node
+
+doc["data"] = [walk(r, r.get("type")) for r in doc["data"]]
+json.dump(doc, open(DST, "w"), indent=2, sort_keys=True)
+print(f"wrote {DST}: {len(doc['data'])} resources, "
+      f"{len(_uuid_map)} uuids and {len(_name_map)} names replaced")

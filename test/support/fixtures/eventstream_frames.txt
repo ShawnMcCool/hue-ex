@@ -1,0 +1,8 @@
+: hi
+
+id: 1786031432:0
+data: [{"creationtime":"2026-08-06T15:50:32Z","data":[{"id":"9f16f574-0288-bc44-05aa-55a540d86e11","id_v1":"/lights/1","on":{"on":true},"owner":{"rid":"20bceb24-5ad3-53b1-4129-4cc0d3ca41af","rtype":"device"},"service_id":0,"type":"light"}],"id":"4f514494-a7eb-a100-01b6-f56365c55fe2","type":"update"}]
+
+id: 1786031433:0
+data: [{"creationtime":"2026-08-06T15:50:32Z","data":[{"dimming":{"brightness":86.11},"id":"efe214d5-b8b2-6c93-4aff-0a12f0a83805","id_v1":"/groups/0","owner":{"rid":"8a96cc1f-9cec-0dff-b315-95c49637d900","rtype":"bridge_home"},"type":"grouped_light"}],"id":"35b6ef94-8639-83d7-d099-b6138bde80ce","type":"update"}]
+
