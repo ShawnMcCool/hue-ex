@@ -105,6 +105,18 @@ defmodule Hue.TransportTest do
         Transport.ssl_options(fingerprint: :abc123)
       end
     end
+
+    test "a fingerprint that is not hex raises, as the message promises" do
+      assert_raise ArgumentError, ~r/hex string/, fn ->
+        Transport.ssl_options(fingerprint: "not-hex-at-all")
+      end
+    end
+
+    test "a non-list argument raises ArgumentError rather than FunctionClauseError" do
+      assert_raise ArgumentError, ~r/keyword list/, fn ->
+        Transport.ssl_options(%{fingerprint: "abc123"})
+      end
+    end
   end
 
   describe "a peer that verified normally" do
@@ -248,10 +260,11 @@ defmodule Hue.TransportTest do
       assert to_string(message) =~ "certificate_changed"
     end
 
-    # Documents why the :valid_peer branch cannot be reached through
-    # ssl_options/1, and why customize_hostname_check does not do what its name
-    # suggests: a SAN-less certificate reached by IP loses its reference ids
-    # before the match fun is consulted.
+    # Documents why customize_hostname_check does not do what its name suggests:
+    # a SAN-less certificate reached by IP loses its reference ids before the
+    # match fun is consulted, so hostname_check_failed pre-empts valid_peer.
+    # Connecting by address is one of the two things gating the :valid_peer
+    # branch; chain length is the other, covered by the tests below.
     test "a trusted CA still cannot produce valid_peer over IP", %{connect: connect} do
       {ca_der, _} = Hue.Certificates.bridge_certificate("issuing_ca")
       port = Hue.Certificates.start_bridge_listener("00178800AABBCCDD")
@@ -275,6 +288,69 @@ defmodule Hue.TransportTest do
 
       assert_receive {:event, {:bad_cert, :hostname_check_failed}}
       refute_received {:event, :valid_peer}
+    end
+
+    # The :valid_peer branch is gated by chain length, not by the empty CA
+    # store: path validation promotes an untrusted chain's head to the anchor
+    # and recurses over the remainder, so one certificate leaves nothing to
+    # validate. These two tests are why that branch must not be deleted.
+    test "one certificate produces no peer event at all" do
+      {_der, fingerprint} = Hue.Certificates.bridge_certificate()
+      port = Hue.Certificates.start_bridge_listener()
+
+      assert observe_events(port, fingerprint) == [{:bad_cert, :selfsigned_peer}]
+    end
+
+    test "a chain reached by name produces valid_peer, and the pin fails it closed" do
+      # Pinned to the issuer, so validation gets past the chain head and reaches
+      # the leaf. The leaf is not what was pinned, and this branch is what
+      # catches that.
+      {_ca_der, ca_fingerprint} = Hue.Certificates.bridge_certificate("issuing_ca")
+      port = Hue.Certificates.start_bridge_listener("00178800AABBCCDD", chain: true)
+
+      assert :valid_peer in observe_events(port, ca_fingerprint, ~c"localhost")
+
+      assert {:fail, :certificate_changed} =
+               Transport.verify_pinned(
+                 Hue.Certificates.otp_certificate("00178800AABBCCDD"),
+                 Hue.Certificates.der("00178800AABBCCDD"),
+                 :valid_peer,
+                 ca_fingerprint
+               )
+    end
+  end
+
+  # Connects with ssl_options/1's exact output, wrapping verify_fun only to
+  # record events; it still delegates to verify_pinned/4 unchanged, so what is
+  # observed is what the real options do.
+  defp observe_events(port, fingerprint, host \\ ~c"127.0.0.1") do
+    test_process = self()
+
+    options =
+      Keyword.update!(
+        Transport.ssl_options(fingerprint: fingerprint),
+        :verify_fun,
+        fn {_fun, state} ->
+          {fn certificate, der, event, pinned ->
+             send(test_process, {:observed, event})
+             Transport.verify_pinned(certificate, der, event, pinned)
+           end, state}
+        end
+      )
+
+    case :ssl.connect(host, port, options ++ [active: false], 5000) do
+      {:ok, socket} -> :ssl.close(socket)
+      {:error, _reason} -> :ok
+    end
+
+    collect_observed([])
+  end
+
+  defp collect_observed(acc) do
+    receive do
+      {:observed, event} -> collect_observed([event | acc])
+    after
+      300 -> Enum.reverse(acc)
     end
   end
 end

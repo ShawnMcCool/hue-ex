@@ -92,11 +92,26 @@ defmodule Hue.Transport do
   `is_function(Fun, 4)`). The pin is compared against those bytes.
 
   An unknown or self-signed issuer is accepted only when the fingerprint matches.
-  A peer that verified normally is also held to the pin: a chain that validates
-  proves the certificate came from some trusted authority, not that it came from
-  *this* bridge. That branch is unreachable under the options `ssl_options/1`
-  builds, which trust no authority at all, but it is what stops a pin from being
-  bypassed if a CA store is ever introduced alongside one.
+  A peer that verified normally is also held to the pin: a validated path proves
+  the certificate was issued by an authority the path accepted, not that it came
+  from *this* bridge.
+
+  **Do not fold `:valid_peer` in with `:valid`, and do not delete it as dead
+  code.** It does not fire while a bridge sends a single certificate, but the
+  reason is chain length, not the absence of a CA store: `pkix_path_validation/3`
+  handles an untrusted chain by promoting its head to the trust anchor and
+  recursing over whatever remains, so a one-certificate chain leaves nothing to
+  validate and produces no peer event at all. That holds with or without
+  `cacerts`.
+
+  Once the chain is longer and validation gets past its head, the leaf arrives as
+  `:valid_peer`, and this branch is the only thing still comparing it to the pin.
+  Reaching it also depends on connecting by name rather than by address: for a
+  certificate with no subjectAltName an IP reference id is dropped before
+  hostname matching, so `:ssl` reports `hostname_check_failed` first, whereas a
+  DNS reference id falls back to CN-ids and lets `:valid_peer` through. Neither
+  condition is exotic — `Hue.Discovery` returns mDNS `.local` names, and nothing
+  here controls what a caller connects to.
 
   Unrecognised events fail closed rather than raising.
   """
@@ -165,7 +180,7 @@ defmodule Hue.Transport do
   was never issued for.
   """
   @spec ssl_options(keyword()) :: keyword()
-  def ssl_options(options \\ []) when is_list(options) do
+  def ssl_options(options \\ []) do
     validate_options!(options)
     fingerprint = options[:fingerprint]
 
@@ -183,6 +198,10 @@ defmodule Hue.Transport do
   end
 
   defp validate_options!(options) do
+    unless Keyword.keyword?(options) do
+      raise ArgumentError, "expected a keyword list of options, got #{inspect(options)}"
+    end
+
     case Keyword.keys(options) -- @known_options do
       [] -> :ok
       unknown -> raise ArgumentError, "unknown option(s) #{inspect(unknown)} for Hue.Transport"
@@ -205,7 +224,14 @@ defmodule Hue.Transport do
   end
 
   defp validate_fingerprint!(nil), do: :ok
-  defp validate_fingerprint!(fingerprint) when is_binary(fingerprint), do: :ok
+
+  defp validate_fingerprint!(fingerprint) when is_binary(fingerprint) do
+    if String.match?(fingerprint, ~r/\A[0-9a-fA-F]+\z/) do
+      :ok
+    else
+      raise ArgumentError, "fingerprint must be a hex string, got #{inspect(fingerprint)}"
+    end
+  end
 
   defp validate_fingerprint!(other) do
     raise ArgumentError, "fingerprint must be a hex string, got #{inspect(other)}"

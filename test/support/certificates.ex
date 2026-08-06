@@ -43,8 +43,8 @@ defmodule Hue.Certificates do
     "00AABBCCDDEEFF00" => "48fb79eeb1a24847b67340475d7d9d260847b7f3361d57587c761ae9f17d8f22",
     "FFFFFFFFFFFFFFFF" => "19b0176ff5be4461cf15626db089ad5ce1af401f6cc5798055522a9a04d466e1",
     "without_common_name" => "bc12a3a5645be5d4a1e7a9d31cf0c23110674a32ec50812507dcc5bfd94ed5df",
-    "00178800AABBCCDD" => "0d585fec48bcae4b016282f20109cc2426974233fb1bad27f3e7735daad09f96",
-    "issuing_ca" => "4a3ebb0279038149982a93704ba5d5100eb1ddf9fafe138ec822bdf437174aed"
+    "00178800AABBCCDD" => "2b7a4fb5984f1995bc687fa1099ae5c5e50c84784c4fefcd026b7f215b04e6f3",
+    "issuing_ca" => "6283ffec7437b7fe7f9dad0cb983a24b06871b244a1d98b5eaf302431d646f52"
   }
 
   @doc "Returns `{der, fingerprint}` for the certificate with the given common name."
@@ -75,13 +75,18 @@ defmodule Hue.Certificates do
   returns its port. The listener serves a single handshake and then goes away
   with the test.
   """
-  def start_bridge_listener(common_name \\ "0011223344556677") do
+  def start_bridge_listener(common_name \\ "0011223344556677", options \\ []) do
+    chain = if options[:chain], do: [cacerts: [der("issuing_ca")]], else: []
+
     {:ok, listen} =
-      :ssl.listen(0,
-        cert: der(common_name),
-        key: {:PrivateKeyInfo, key(common_name)},
-        reuseaddr: true,
-        active: false
+      :ssl.listen(
+        0,
+        [
+          cert: der(common_name),
+          key: {:PrivateKeyInfo, key(common_name)},
+          reuseaddr: true,
+          active: false
+        ] ++ chain
       )
 
     {:ok, {_address, port}} = :ssl.sockname(listen)
