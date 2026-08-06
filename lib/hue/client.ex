@@ -6,8 +6,31 @@ defmodule Hue.Client do
   stubs and set their own timeout and retry policy, so this library invents no
   configuration system of its own.
 
-  The application key is redacted by `Inspect` so it cannot reach logs or crash
-  dumps.
+  ## Never set `:connect_options` on the request
+
+  The pinned TLS options live at
+  `req.options[:connect_options][:transport_opts]`, and `Req.merge/2`
+  **replaces** `:connect_options` wholesale rather than merging into it. So
+
+      Req.request(client.req, connect_options: [timeout: 1_000])
+
+  discards `:transport_opts` along with it and connects unverified, silently.
+  `Hue.new/2` guards its own construction and cannot guard this. Pass
+  `:connect_options` to `Hue.new/2` instead, where they are merged and a
+  `:transport_opts` among them is refused. Nothing in this library may forward
+  a caller's `:connect_options` onto a request either.
+
+  For the same reason a caller cannot bring their own Finch pool:
+  `finch: [name: MyFinch]` raises `cannot set both :finch and :connect_options`,
+  because the pinned options are what the pool is keyed on and built from.
+
+  ## What the redaction covers
+
+  `Inspect` prints the application key as `[REDACTED]`, which keeps it out of
+  ordinary inspect output — Logger, IEx, and the formatting of exceptions that
+  carry a client. That is the whole of the guarantee. `inspect(client,
+  structs: false)` prints the raw struct, and an `erl_crash.dump` writes heap
+  terms with no involvement from `Inspect` at all.
   """
 
   @type t :: %__MODULE__{
