@@ -154,10 +154,25 @@ defmodule Hue.Error do
   carrying any other term — `hostname_check_failed` and `cert_expired` both
   arrive through this same wrapping — are negotiation or certificate problems,
   not evidence that anything was swapped.
+
+  ## Why it tolerates two spellings of that line
+
+  `ssl_alert.erl` carries two adjacent formatters for the same alert:
+  `own_alert_format_depth/1` renders `" ~s\\n ~P"`, putting the refused term
+  bare on the last line, while `own_alert_format/1` ten lines above renders
+  `" ~s\\n - ~p"`, which inspects the atom and so prints `- :certificate_changed`.
+  Which one produced the text handed to this function is not ours to choose, and
+  a parser coupled to one of them degrades the other to `:unknown`. So a leading
+  `- ` and a leading `:` are stripped, and trailing blank lines are skipped,
+  before an equality comparison that is otherwise unchanged.
   """
   @spec from_transport(Exception.t() | %{reason: term()}) :: t()
   def from_transport(%{reason: {:tls_alert, {_type, text}}}) do
-    description = List.to_string(text)
+    # chardata rather than List.to_string/1: :ssl and Mint both hand back a
+    # charlist, measured, but this is the function whose whole job is that the
+    # one failure it must never lose does not get lost, and raising on a binary
+    # would lose it.
+    description = IO.chardata_to_string(text)
 
     %__MODULE__{reason: refused_term(description), description: description}
   end
@@ -175,13 +190,26 @@ defmodule Hue.Error do
   end
 
   defp refused_term(description) do
-    refused = description |> String.split("\n") |> List.last() |> String.trim()
+    refused =
+      description
+      |> String.split("\n")
+      |> Enum.map(&String.trim/1)
+      |> Enum.reject(&(&1 == ""))
+      |> List.last("")
+      |> unprefix()
 
     if refused in @verify_fun_reasons do
       String.to_existing_atom(refused)
     else
       :unknown
     end
+  end
+
+  # Folds the two formatters' spellings together — and nothing else. This stays
+  # a prefix strip rather than becoming a search: a line that merely mentions
+  # one of these terms must not be read as one.
+  defp unprefix(line) do
+    line |> String.trim_leading("- ") |> String.trim_leading(":")
   end
 
   defp describe(body, "application/json" <> _) when is_binary(body) and body != "" do

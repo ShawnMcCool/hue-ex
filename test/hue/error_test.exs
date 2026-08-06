@@ -110,6 +110,58 @@ defmodule Hue.ErrorTest do
                Error.from_transport(%Mint.TransportError{reason: embedded})
     end
 
+    # ssl_alert.erl carries two adjacent formatters for the same alert:
+    # own_alert_format_depth/1 renders " ~s\n ~P" and own_alert_format/1 renders
+    # " ~s\n - ~p". Which one produced the text this library is handed is not
+    # ours to choose, so both trailing forms must map back.
+    test "the sibling alert formatter's dash-and-atom form maps back too" do
+      assert %Error{reason: :certificate_changed} =
+               Error.from_transport(%Mint.TransportError{
+                 reason: sibling_alert("certificate_changed")
+               })
+
+      assert %Error{reason: :unexpected_verification_event} =
+               Error.from_transport(%Mint.TransportError{
+                 reason: sibling_alert("unexpected_verification_event")
+               })
+    end
+
+    test "a bare inspected atom on the last line maps back too" do
+      assert %Error{reason: :certificate_changed} =
+               Error.from_transport(%Mint.TransportError{
+                 reason: alert_ending_in(~c":certificate_changed")
+               })
+    end
+
+    test "neither leading form widens the match into a substring search" do
+      for trailer <- [~c" - :hostname_check_failed", ~c" :cert_expired"] do
+        assert %Error{reason: :unknown} =
+                 Error.from_transport(%Mint.TransportError{reason: alert_ending_in(trailer)})
+      end
+    end
+
+    test "a trailing blank line does not hide the refused term" do
+      assert %Error{reason: :certificate_changed} =
+               Error.from_transport(%Mint.TransportError{
+                 reason: alert_ending_in(~c" - :certificate_changed\n")
+               })
+    end
+
+    # Not a shape :ssl or Mint has been observed to produce -- both hand back
+    # charlists, measured -- but the whole point of this function is that the
+    # one failure it must never lose is the one arriving in an unexpected form.
+    test "alert text that arrives as a binary is read, not raised on" do
+      assert %Error{reason: :certificate_changed, description: description} =
+               Error.from_transport(%Mint.TransportError{
+                 reason:
+                   {:tls_alert,
+                    {:handshake_failure,
+                     "TLS client: Fatal - Handshake Failure\n - :certificate_changed"}}
+               })
+
+      assert description =~ "Handshake Failure"
+    end
+
     test "keeps the alert text as the description, whatever the reason" do
       assert %Error{description: description} =
                Error.from_transport(%Mint.TransportError{reason: client_alert("cert_expired")})
@@ -129,10 +181,21 @@ defmodule Hue.ErrorTest do
   # text, after a newline. This is the exact string observed on OTP 28; only
   # the trailing term varies.
   defp client_alert(term) do
+    alert_ending_in(~c" " ++ String.to_charlist(term))
+  end
+
+  # The form ssl_alert.erl's own_alert_format/1 produces: " ~s\n - ~p", which
+  # inspects the atom and so prints its leading colon. Observed in Logger output
+  # on OTP 28 alongside the depth formatter's bare-term form.
+  defp sibling_alert(term) do
+    alert_ending_in(~c" - :" ++ String.to_charlist(term))
+  end
+
+  defp alert_ending_in(trailer) do
     {:tls_alert,
      {:handshake_failure,
       ~c"TLS client: In state wait_cert_cr at ssl_handshake.erl:2200 generated CLIENT ALERT: " ++
-        ~c"Fatal - Handshake Failure\n " ++ String.to_charlist(term)}}
+        ~c"Fatal - Handshake Failure\n" ++ trailer}}
   end
 
   describe "message/1" do

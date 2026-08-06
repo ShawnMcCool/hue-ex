@@ -242,6 +242,16 @@ defmodule Hue.DiscoveryTest do
       assert Discovery.identity_agrees?(nil, "0011223344556677")
       assert Discovery.identity_agrees?("0011223344556677", nil)
     end
+
+    # U+FB00, LATIN SMALL LIGATURE FF, is what tells :ascii folding apart from
+    # full Unicode folding: String.upcase/1 expands it to "FF", so a plain
+    # upcase would call this pair equal. A comparison that claims to be about
+    # hex must be about hex, and this is the test that fails if the `:ascii`
+    # argument is ever dropped.
+    test "folding is ASCII-only, so a ligature is not two hex digits" do
+      refute Discovery.identity_agrees?("001788ﬀfeae1b58", "001788FFFEAE1B58")
+      assert Discovery.identity_agrees?("001788ﬀfeae1b58", "001788ﬀFEAE1B58")
+    end
   end
 
   describe "merge/1" do
@@ -323,6 +333,17 @@ defmodule Hue.DiscoveryTest do
       body = [%{"id" => "001788fffeae1b58", "internalipaddress" => "192.0.2.10"}]
 
       assert [%Bridge.Info{port: 443}] = Discovery.parse_cloud_response(body)
+    end
+
+    # Same reason as identity_agrees?/2: full Unicode upcasing would turn the
+    # U+FB00 ligature into the two hex digits "FF" and manufacture an id the
+    # endpoint never reported.
+    test "upcasing the id is ASCII-only, so it invents no hex digits" do
+      body = [%{"id" => "001788ﬀfeae1b58", "internalipaddress" => "192.0.2.10"}]
+
+      assert [%Bridge.Info{bridge_id: bridge_id}] = Discovery.parse_cloud_response(body)
+      assert bridge_id == "001788ﬀFEAE1B58"
+      refute bridge_id == "001788FFFEAE1B58"
     end
 
     test "skips entries with no address" do
