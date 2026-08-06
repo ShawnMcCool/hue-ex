@@ -73,6 +73,10 @@ defmodule Hue.EventstreamServer do
     {port, fingerprint}
   end
 
+  # Keeps accepting rather than serving one connection and going away, because
+  # "how many times did the client ask?" is a question a test needs to be able
+  # to answer. A listener that answers exactly once cannot tell a client that
+  # asked once from a client that asked four times and found nobody home.
   defp serve(listen, fragments, options) do
     report_to = Keyword.fetch!(options, :report_to)
 
@@ -84,6 +88,8 @@ defmodule Hue.EventstreamServer do
       send(report_to, {:eventstream_finished, :ssl.recv(socket, 0, @linger_timeout)})
       :ssl.close(socket)
     end
+
+    serve(listen, fragments, options)
   end
 
   defp respond(socket, fragments, options) do

@@ -49,6 +49,11 @@ defmodule Hue.Events do
   @known_options [:receive_timeout]
   @error_body_timeout 1_000
 
+  # The fields Hue.Event declares as String.t() | nil, by the key they arrive
+  # under. `data` and `owner` are checked separately: they are objects.
+  @envelope_text_fields ~w(type id creationtime)
+  @resource_text_fields ~w(type id)
+
   @envelope_type_names ~w(add update delete error)
   @envelope_types Map.new(@envelope_type_names, &{&1, String.to_atom(&1)})
 
@@ -92,7 +97,7 @@ defmodule Hue.Events do
       |> Hue.Events.stream()
       |> Enum.each(&handle/1)
 
-  ## It starts no process
+  ## It starts no process of its own
 
   The connection is opened when the stream is first enumerated, in whichever
   process enumerates it, and it is closed when the stream stops — including when
@@ -100,15 +105,34 @@ defmodule Hue.Events do
   than leaking it. Where the work runs and what happens after a disconnect are
   the caller's decisions; this function reconnects nothing and retries nothing.
 
+  Finch's pools and OTP's TLS processes are still there, exactly as they are for
+  `Hue.Resource`. What this function adds is nothing of its own.
+
   Nothing is received except the connection's own messages. The caller's mailbox
   is a place this library is a guest in, and a bare `receive` here would take
   whatever happened to be at the front of it.
 
+  ## Retry is off, and cannot be turned on
+
+  Req retries `:safe_transient` failures by default, and a `GET` answered 429 or
+  5xx is one. That is wrong twice over here. A stream that was partly read
+  cannot be resumed by repeating the request, and — measured — each abandoned
+  attempt leaves its own `into: :self` chunks behind in the caller's mailbox,
+  because the retry step drops the earlier response without cancelling it. A
+  consumer whose bridge answered 503 would get the error it expected plus six
+  stray messages at `handle_info`.
+
+  So this request is made with `retry: false` regardless of what the client was
+  built with. Reconnecting is the caller's job, and it is the only place that
+  knows whether the events it already handled make a fresh request the right
+  move.
+
   ## Options
 
     * `:receive_timeout` — milliseconds to wait for the next byte from the
-      bridge. Defaults to `:infinity`; read the moduledoc's "Silence is not
-      evidence of anything" before setting it to a number.
+      bridge, as a non-negative integer or `:infinity`. Defaults to `:infinity`;
+      read the moduledoc's "Silence is not evidence of anything" before setting
+      it to a number.
 
   ## Failures
 
@@ -137,6 +161,7 @@ defmodule Hue.Events do
         headers: headers(client),
         into: :self,
         decode_body: false,
+        retry: false,
         receive_timeout: Keyword.get(options, :receive_timeout, :infinity)
       )
 
@@ -271,7 +296,11 @@ defmodule Hue.Events do
   defp to_events(event), do: dropped("an event carried no data", event)
 
   defp from_envelope(%{"data" => resources} = envelope) when is_list(resources) do
-    Enum.flat_map(resources, &from_resource(&1, envelope))
+    if text_fields?(envelope, @envelope_text_fields) do
+      Enum.flat_map(resources, &from_resource(&1, envelope))
+    else
+      dropped("an envelope's identity was not the text CLIP v2 declares", envelope)
+    end
   end
 
   defp from_envelope(envelope) do
@@ -279,28 +308,48 @@ defmodule Hue.Events do
   end
 
   defp from_resource(resource, envelope) when is_map(resource) do
-    [
-      %Event{
-        type: envelope_type(envelope["type"]),
-        resource_type: resource_type(resource["type"]),
-        rid: resource["id"],
-        data: resource,
-        owner: resource["owner"],
-        id: envelope["id"],
-        creationtime: envelope["creationtime"]
-      }
-    ]
+    if text_fields?(resource, @resource_text_fields) and owner?(resource["owner"]) do
+      [
+        %Event{
+          type: envelope_type(envelope["type"]),
+          resource_type: resource_type(resource["type"]),
+          rid: resource["id"],
+          data: resource,
+          owner: resource["owner"],
+          id: envelope["id"],
+          creationtime: envelope["creationtime"]
+        }
+      ]
+    else
+      dropped("a changed resource's identity was not the text CLIP v2 declares", resource)
+    end
   end
 
   defp from_resource(resource, _envelope) do
     dropped("a changed resource was not an object", resource)
   end
 
+  # `Hue.Event`'s declared types are a promise about what a consumer may pattern
+  # match on, and the bridge fills every one of these fields. Trusting it to
+  # send text here while refusing to trust it to name an atom would be the same
+  # misplaced confidence, one line apart -- so a field that arrives as something
+  # other than text takes the frame down the same path every other malformed
+  # shape takes.
+  #
+  # Absent is not wrong. A field the bridge did not send is `nil`, which each of
+  # these is declared to allow, and a bridge that says nothing has not said
+  # something false.
+  defp text_fields?(map, keys) do
+    Enum.all?(keys, fn key -> is_nil(map[key]) or is_binary(map[key]) end)
+  end
+
+  defp owner?(owner), do: is_nil(owner) or is_map(owner)
+
   defp envelope_type(type) when is_binary(type), do: Map.get(@envelope_types, type, type)
-  defp envelope_type(other), do: other
+  defp envelope_type(nil), do: nil
 
   defp resource_type(type) when is_binary(type), do: Map.get(@resource_types, type, type)
-  defp resource_type(other), do: other
+  defp resource_type(nil), do: nil
 
   defp dropped(what, term) do
     Logger.warning(
@@ -319,5 +368,24 @@ defmodule Hue.Events do
       [] -> :ok
       unknown -> raise ArgumentError, "unknown option(s) #{inspect(unknown)} for Hue.Events"
     end
+
+    validate_receive_timeout!(Keyword.fetch(options, :receive_timeout))
+  end
+
+  # Checked here rather than left for Finch, which would fail somewhere deep in
+  # a request the caller has already stopped being able to relate to this
+  # option. Fetched rather than read with a default, so an explicit `nil` is the
+  # mistake it is instead of quietly meaning ":infinity".
+  defp validate_receive_timeout!(:error), do: :ok
+  defp validate_receive_timeout!({:ok, :infinity}), do: :ok
+
+  defp validate_receive_timeout!({:ok, milliseconds})
+       when is_integer(milliseconds) and milliseconds >= 0,
+       do: :ok
+
+  defp validate_receive_timeout!({:ok, other}) do
+    raise ArgumentError,
+          "receive_timeout: #{inspect(other)} is not a duration — pass a non-negative number " <>
+            "of milliseconds, or :infinity to wait as long as the bridge stays quiet"
   end
 end

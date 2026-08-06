@@ -177,6 +177,57 @@ defmodule Hue.EventsTest do
       assert log =~ "no list of changed resources"
     end
 
+    # The struct's declared types are a promise about what a consumer can match
+    # on. Passing an integer through where a String.t() was declared is the same
+    # misplaced trust as calling String.to_atom/1 on a name from the bridge.
+    test "a type that is not text is dropped rather than passed off as a String.t()" do
+      log =
+        capture_log(fn ->
+          assert Events.decode(
+                   frame(~s([{"id":"e","type":42,"data":[{"id":"1","type":"light"}]}]))
+                 ) ==
+                   []
+
+          assert Events.decode(
+                   frame(~s([{"id":"e","type":"update","data":[{"id":"1","type":7}]}]))
+                 ) ==
+                   []
+        end)
+
+      assert log =~ "envelope"
+      assert log =~ "resource"
+    end
+
+    test "an rid that is not text is dropped too" do
+      log =
+        capture_log(fn ->
+          assert Events.decode(
+                   frame(~s([{"id":"e","type":"update","data":[{"id":1,"type":"light"}]}]))
+                 ) == []
+        end)
+
+      assert log =~ "resource"
+    end
+
+    test "an owner that is not an object is dropped too" do
+      body = ~s([{"id":"e","type":"update","data":[{"id":"1","type":"light","owner":"nope"}]}])
+      log = capture_log(fn -> assert Events.decode(frame(body)) == [] end)
+
+      assert log =~ "resource"
+    end
+
+    # Absent and wrong are different situations. A bridge that sends no
+    # creationtime has told us nothing; one that sends 42 has told us something
+    # false.
+    test "a field the bridge simply omitted is not malformed" do
+      [event] = Events.decode(frame(~s([{"type":"update","data":[{"type":"light"}]}])))
+
+      assert event.rid == nil
+      assert event.id == nil
+      assert event.creationtime == nil
+      assert event.resource_type == :light
+    end
+
     test "a resource that is not an object is dropped, and says so" do
       log =
         capture_log(fn ->
@@ -374,6 +425,88 @@ defmodule Hue.EventsTest do
         Events.stream(client, %{receive_timeout: 1_000})
       end
     end
+
+    test "a receive_timeout that is not a duration is refused" do
+      {:ok, client} = Hue.new("127.0.0.1", verify: :none)
+
+      for value <- ["loud", -1, 1.5, nil] do
+        assert_raise ArgumentError, ~r/receive_timeout/, fn ->
+          Events.stream(client, receive_timeout: value)
+        end
+      end
+    end
+
+    test ":infinity and any count of milliseconds are durations" do
+      {:ok, client} = Hue.new("127.0.0.1", verify: :none)
+
+      for value <- [:infinity, 0, 5_000] do
+        assert Enumerable.impl_for(Events.stream(client, receive_timeout: value))
+      end
+    end
+
+    test "a bounded receive_timeout still reads the stream it was given" do
+      raw = Hue.Fixtures.raw("eventstream_frames.txt")
+      {port, fingerprint} = Hue.EventstreamServer.start([raw], close_after: :done)
+
+      assert client(port, fingerprint)
+             |> Events.stream(receive_timeout: 5_000)
+             |> Enum.to_list() == Events.decode(raw)
+    end
+  end
+
+  # Every other stream test builds its client with `retry: false`, which is a
+  # habit that can hide a whole configuration. These use the one `Hue.new/2`
+  # actually hands out. `retry_delay: 0` removes the waiting between attempts,
+  # not the retrying -- `retry: :safe_transient` and `max_retries: 3` are still
+  # Req's defaults here, so a retry would still happen and still be counted.
+  describe "stream/2 under the configuration Hue.new/2 actually produces" do
+    test "asks the bridge once, because a half-read stream cannot be resumed" do
+      {port, fingerprint} = retrying_bridge()
+
+      capture_log(fn ->
+        assert_raise Hue.Error, fn ->
+          retrying_client(port, fingerprint) |> Events.stream() |> Enum.to_list()
+        end
+      end)
+
+      assert_received {:eventstream_request, _request}
+      refute_received {:eventstream_request, _request}
+    end
+
+    # A retried request abandons its predecessor's `into: :self` response
+    # without cancelling it, so every attempt but the last leaves its chunks
+    # behind in a mailbox this library does not own.
+    test "leaves no orphaned chunks behind in the caller's mailbox" do
+      collector = spawn(fn -> Process.sleep(:infinity) end)
+      on_exit(fn -> Process.exit(collector, :kill) end)
+
+      {port, fingerprint} = retrying_bridge(report_to: collector)
+
+      capture_log(fn ->
+        assert_raise Hue.Error, fn ->
+          retrying_client(port, fingerprint) |> Events.stream() |> Enum.to_list()
+        end
+      end)
+
+      refute_received {_reference, _payload}
+    end
+
+    test "the refusal still reaches the caller as the reason the bridge gave" do
+      {port, fingerprint} = retrying_bridge()
+
+      error =
+        capture_log(fn ->
+          error =
+            assert_raise Hue.Error, fn ->
+              retrying_client(port, fingerprint) |> Events.stream() |> Enum.to_list()
+            end
+
+          send(self(), {:error, error})
+        end)
+
+      assert is_binary(error)
+      assert_received {:error, %Hue.Error{reason: :bridge_busy, status: 503}}
+    end
   end
 
   # -- helpers ---------------------------------------------------------------
@@ -385,6 +518,30 @@ defmodule Hue.EventsTest do
         fingerprint: fingerprint,
         application_key: @application_key,
         retry: false
+      )
+
+    client
+  end
+
+  # 503 is a documented bridge answer, and it is one of the statuses Req's
+  # default `:safe_transient` retries.
+  defp retrying_bridge(options \\ []) do
+    Hue.EventstreamServer.start(
+      [],
+      Keyword.merge(options,
+        status: {503, "Service Unavailable"},
+        body: ~s({"errors":[{"description":"bridge is busy"}]})
+      )
+    )
+  end
+
+  defp retrying_client(port, fingerprint) do
+    {:ok, client} =
+      Hue.new("127.0.0.1",
+        port: port,
+        fingerprint: fingerprint,
+        application_key: @application_key,
+        retry_delay: 0
       )
 
     client
