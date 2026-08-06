@@ -43,7 +43,6 @@ defmodule Hue.Error do
           | :closed
           | :nxdomain
           | :unknown
-          | atom()
 
   @type t :: %__MODULE__{
           reason: reason(),
@@ -88,6 +87,11 @@ defmodule Hue.Error do
 
   @doc """
   Builds an error from the v1 pairing envelope, which arrives at HTTP 200.
+
+  Raises `FunctionClauseError` unless the body is error-shaped (a list headed by
+  an `"error"` entry, or a map with a `"type"` key). Callers must route on
+  `"error"` versus `"success"` before calling this — it is not safe to call
+  unconditionally on a pairing response.
   """
   @spec from_pairing(list() | map()) :: t()
   def from_pairing([%{"error" => error} | _]), do: from_pairing(error)
