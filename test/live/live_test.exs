@@ -68,34 +68,25 @@ defmodule Hue.LiveTest do
              Hue.Discovery.identify(bridge.host, port: bridge.port)
   end
 
-  # KNOWN TO FAIL against real hardware -- reported prominently in Task 12's
-  # write-up rather than patched here. Left asserting the documented
-  # behaviour, not the observed one: the gap is in Hue.Transport, not in what
-  # this suite should claim is true.
+  # This test found a real bypass on 2026-08-06 and now guards the fix.
   #
-  # `setup_all` already opened a `verify_peer` TLS connection to this same
+  # `setup_all` has already opened a `verify_peer` TLS connection to this same
   # host:port, pinned to the *real* fingerprint (identify/2's own pinned
-  # `/api/config` request). Verified 2026-08-06 against this bridge,
-  # independent of Req/Finch entirely (plain :ssl.connect/4, twice, back to
-  # back, no HTTP involved): the second connection resumes the first one's
-  # TLS session -- same session_id both times, per :ssl.connection_information/2
-  # -- and OTP's :ssl does not re-invoke verify_fun for an abbreviated
-  # handshake, because no certificate is re-presented for it to check. So a
-  # *second* verify_peer connection to a host this process already holds a
-  # session with can succeed under a fingerprint that does not match what is
-  # actually pinned -- silently, with no alert and no Hue.Error at all.
+  # `/api/config` request). That used to be enough to defeat the pin: the
+  # second connection resumed the first one's TLS session -- same session_id
+  # both times, per :ssl.connection_information/2 -- and an abbreviated
+  # handshake re-presents no certificate, so OTP never re-invoked verify_fun
+  # and the wrong fingerprint below was never compared to anything. It
+  # succeeded silently, with no alert and no Hue.Error at all. Reproduced
+  # independently of Req and Finch, with two plain :ssl.connect/4 calls back
+  # to back.
   #
-  # Confirmed this is specific to two verify_peer connections in a row: an
-  # unverified (verify_none) connection followed by a wrongly-pinned one is
-  # refused correctly, so Hue.Discovery.identify/2's own capture-then-verify
-  # sequence is not affected by this. What is affected is exactly the case
-  # this test sets up -- a wrongly-pinned client built after a correctly
-  # pinned one has already talked to the bridge -- which is also the shape
-  # `Hue.new/2`'s moduledoc documents as failing closed. It does not, here.
-  # This is not this library's fixtures catching up; the fixture-based
-  # pinning tests each spin up a fresh one-shot listener on its own ephemeral
-  # port (see Hue.Certificates), so no session ever survives from one test to
-  # the next for there to be anything to resume.
+  # Hue.Transport now disables session resumption on every connection it
+  # builds options for, so each one performs a full handshake and the pin is
+  # checked every time. Hue.Certificates grew the other half of the lesson:
+  # its listeners pin TLS 1.2, matching this bridge, because on TLS 1.3 the
+  # resumption this test is about cannot happen at all and the fixture suite
+  # stayed green through the entire bug.
   #
   # The real application key is used here, deliberately, rather than a fake
   # one: it is the only way to make a resumption bypass unambiguous. An
@@ -104,9 +95,9 @@ defmodule Hue.LiveTest do
   # observed `{:error, %Hue.Error{reason: :unauthorized, status: 403}}`,
   # which reads exactly like a correct refusal until you notice *what*
   # refused it: a 403 is the HTTP layer rejecting a bad key over a
-  # connection that TLS had already accepted. With the real key, the same
-  # resumed session instead returns this bridge's actual light data --
-  # proof, not just an inference, that the pin was never checked.
+  # connection that TLS had already accepted. With the real key, a resumed
+  # session instead returned this bridge's actual light data -- proof, not
+  # just an inference, that the pin was never checked. Keep the real key.
   test "a wrong pinned fingerprint is refused as :certificate_changed", %{
     bridge: bridge,
     key: key

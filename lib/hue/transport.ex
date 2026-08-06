@@ -23,6 +23,23 @@ defmodule Hue.Transport do
   A changed fingerprint means either a factory-reset bridge or an interception,
   and those are indistinguishable from here, so it fails closed.
 
+  ## Session resumption is disabled, deliberately
+
+  Every connection here performs a full handshake. `:ssl` would otherwise cache a
+  successful session and resume it for the next connection to the same
+  `host:port` — and a resumed session presents **no certificate**, so
+  `verify_fun` is never called and the pin is never consulted. That turned a pin
+  into a one-shot check: once any connection to a bridge succeeded, a second
+  client with a completely wrong fingerprint resumed that session and talked to
+  the bridge, with no alert and no error. Verified against real hardware, and
+  invisible to a fixture suite because each synthetic listener gets a fresh port
+  and so has no session to resume.
+
+  The cost is a full handshake — a few extra round trips and one RSA
+  verification — on every connection instead of only the first. Against a
+  bridge on the local network that is negligible, and the alternative is a pin
+  that stops being enforced after the first connection, which is no pin at all.
+
   ## Learning the fingerprint
 
   `ssl_options/1` with no `:fingerprint` returns unverified options. That is the
@@ -54,6 +71,14 @@ defmodule Hue.Transport do
   @known_options [:fingerprint, :verify]
   @fingerprint_length 64
   @capture_timeout 5_000
+
+  # A resumed TLS session presents no certificate, so `verify_fun` is never
+  # called and the pin is never consulted. Both options are needed because the
+  # two protocol versions resume differently: `reuse_sessions` covers TLS 1.2
+  # session ids, `session_tickets` covers TLS 1.3 PSK tickets. The latter
+  # already defaults to `:disabled` for clients; it is stated anyway so the
+  # guarantee survives a change of default.
+  @no_resumption [reuse_sessions: false, session_tickets: :disabled]
 
   @typedoc "A certificate as DER bytes, or as the record OTP's `:ssl` passes to a `verify_fun`."
   @type certificate :: binary() | tuple()
@@ -230,7 +255,7 @@ defmodule Hue.Transport do
     validate_options!(options)
 
     case options[:fingerprint] do
-      nil -> [verify: :verify_none]
+      nil -> [verify: :verify_none] ++ @no_resumption
       fingerprint -> pinned_options(normalize_fingerprint(fingerprint))
     end
   end
@@ -252,6 +277,12 @@ defmodule Hue.Transport do
   weaker options of its own, so there is exactly one definition of "unverified"
   in this module and no `verify_fun` anywhere that returns `:valid` without
   comparing a pin.
+
+  Borrowing is also what keeps this correct rather than merely consistent: those
+  options disable session resumption, and a capture that resumed a session would
+  be handed a cached certificate instead of the one the server is presenting
+  now. A function whose entire job is to observe the live certificate must never
+  resume.
 
   It connects separately rather than reaching into the connection Req is about
   to make. Capturing during Req's own handshake would mean installing a
@@ -297,7 +328,7 @@ defmodule Hue.Transport do
       depth: 0,
       verify_fun: {&__MODULE__.verify_pinned/4, fingerprint},
       customize_hostname_check: [match_fun: fn _reference, _presented -> true end]
-    ]
+    ] ++ @no_resumption
   end
 
   defp validate_options!(options) do

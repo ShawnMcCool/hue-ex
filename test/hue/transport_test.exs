@@ -319,6 +319,32 @@ defmodule Hue.TransportTest do
       assert to_string(message) =~ "certificate_changed"
     end
 
+    # A resumed session presents no certificate, so verify_fun never runs and
+    # the pin is never consulted. Every other handshake test here uses a
+    # one-shot listener on a fresh port, so no session ever survives for there
+    # to be anything to resume — which is exactly why this bypass reached real
+    # hardware unnoticed. These two need a listener that stays up.
+    test "a wrong pin cannot ride in on a session an earlier connection established" do
+      {_der, fingerprint} = Hue.Certificates.bridge_certificate()
+      {_other, wrong_fingerprint} = Hue.Certificates.bridge_certificate("FFFFFFFFFFFFFFFF")
+      port = Hue.Certificates.start_bridge_https_listener()
+
+      assert {:ok, first} = tls_connect(port, fingerprint)
+      :ssl.close(first)
+
+      assert {:error, {:tls_alert, {:handshake_failure, message}}} =
+               tls_connect(port, wrong_fingerprint)
+
+      assert to_string(message) =~ "certificate_changed"
+    end
+
+    test "two pinned connections to one bridge negotiate two distinct sessions" do
+      {_der, fingerprint} = Hue.Certificates.bridge_certificate()
+      port = Hue.Certificates.start_bridge_https_listener()
+
+      assert session_id(port, fingerprint) != session_id(port, fingerprint)
+    end
+
     test "the real hardware shape connects when pinned", %{connect: connect} do
       {_der, fingerprint} = Hue.Certificates.bridge_certificate("00178800AABBCCDD")
       port = Hue.Certificates.start_bridge_listener("00178800AABBCCDD")
@@ -446,11 +472,28 @@ defmodule Hue.TransportTest do
       # the pinned branch can drift as a side effect of capturing.
       {_der, fingerprint} = Hue.Certificates.bridge_certificate()
 
-      assert Transport.ssl_options() == [verify: :verify_none]
+      assert Transport.ssl_options() ==
+               [verify: :verify_none, reuse_sessions: false, session_tickets: :disabled]
 
       assert Keyword.fetch!(Transport.ssl_options(fingerprint: fingerprint), :verify) ==
                :verify_peer
     end
+  end
+
+  defp tls_connect(port, fingerprint) do
+    :ssl.connect(
+      ~c"127.0.0.1",
+      port,
+      Transport.ssl_options(fingerprint: fingerprint) ++ [active: false],
+      5000
+    )
+  end
+
+  defp session_id(port, fingerprint) do
+    {:ok, socket} = tls_connect(port, fingerprint)
+    {:ok, information} = :ssl.connection_information(socket, [:session_id])
+    :ssl.close(socket)
+    information[:session_id]
   end
 
   # Connects with ssl_options/1's exact output, wrapping verify_fun only to

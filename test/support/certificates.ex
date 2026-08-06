@@ -38,6 +38,14 @@ defmodule Hue.Certificates do
 
   @dir Path.join(__DIR__, "fixtures/certificates")
 
+  # A real BSB002 bridge negotiates TLS 1.2, so these listeners do too. Left to
+  # default they would negotiate TLS 1.3, which models the hardware less closely
+  # and — because TLS 1.3 resumes with PSK tickets that clients have disabled by
+  # default, rather than with session ids — cannot reproduce session resumption
+  # at all. That mismatch is why a pin that stopped being enforced after the
+  # first connection went unnoticed here until real hardware found it.
+  @bridge_versions [versions: [:"tlsv1.2"]]
+
   @fingerprints %{
     "0011223344556677" => "21cdf48f5217f21923a498576d01c31d800424dafef70efc259f1e05134f3274",
     "00AABBCCDDEEFF00" => "48fb79eeb1a24847b67340475d7d9d260847b7f3361d57587c761ae9f17d8f22",
@@ -86,7 +94,7 @@ defmodule Hue.Certificates do
           key: {:PrivateKeyInfo, key(common_name)},
           reuseaddr: true,
           active: false
-        ] ++ chain
+        ] ++ chain ++ @bridge_versions
       )
 
     {:ok, {_address, port}} = :ssl.sockname(listen)
@@ -129,13 +137,16 @@ defmodule Hue.Certificates do
   """
   def start_bridge_https_listener(common_name \\ "0011223344556677", options \\ []) do
     {:ok, listen} =
-      :ssl.listen(0,
-        cert: der(common_name),
-        key: {:PrivateKeyInfo, key(common_name)},
-        reuseaddr: true,
-        active: false,
-        packet: :raw,
-        mode: :binary
+      :ssl.listen(
+        0,
+        [
+          cert: der(common_name),
+          key: {:PrivateKeyInfo, key(common_name)},
+          reuseaddr: true,
+          active: false,
+          packet: :raw,
+          mode: :binary
+        ] ++ @bridge_versions
       )
 
     {:ok, {_address, port}} = :ssl.sockname(listen)
@@ -164,13 +175,16 @@ defmodule Hue.Certificates do
   """
   def start_stalling_bridge_listener(common_name \\ "0011223344556677") do
     {:ok, listen} =
-      :ssl.listen(0,
-        cert: der(common_name),
-        key: {:PrivateKeyInfo, key(common_name)},
-        reuseaddr: true,
-        active: false,
-        packet: :raw,
-        mode: :binary
+      :ssl.listen(
+        0,
+        [
+          cert: der(common_name),
+          key: {:PrivateKeyInfo, key(common_name)},
+          reuseaddr: true,
+          active: false,
+          packet: :raw,
+          mode: :binary
+        ] ++ @bridge_versions
       )
 
     {:ok, {_address, port}} = :ssl.sockname(listen)
