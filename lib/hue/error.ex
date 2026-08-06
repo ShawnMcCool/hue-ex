@@ -43,6 +43,7 @@ defmodule Hue.Error do
           | :econnrefused
           | :closed
           | :nxdomain
+          | :unexpected_response
           | :unknown
 
   @type t :: %__MODULE__{
