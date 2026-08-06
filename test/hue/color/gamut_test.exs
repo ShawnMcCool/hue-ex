@@ -86,20 +86,52 @@ defmodule Hue.Color.GamutTest do
 
   describe "degenerate gamuts" do
     @degenerate %{red: {0.3, 0.3}, green: {0.3, 0.3}, blue: {0.3, 0.3}}
+    @two_coincide %{red: {0.3, 0.3}, green: {0.3, 0.3}, blue: {0.9, 0.1}}
+    @collinear %{red: {0.0, 0.0}, green: {0.5, 0.5}, blue: {1.0, 1.0}}
 
-    test "contains?/2 on a single-point gamut treats the cross-product test's blind spot honestly" do
-      # A zero-area triangle carries no information a cross-product sign test
-      # can use to separate "inside" from "outside" — every determinant comes
-      # out exactly zero, algebraically, regardless of the query point. This
-      # is documented behaviour, not a special case: it only arises for input
-      # no real Hue bridge sends (every gamut on the reference bridge is a
-      # proper triangle — see the moduledoc).
+    test "contains?/2 on a single-point gamut (all three primaries equal) is unconditionally true" do
+      # All three primaries coinciding collapses every cross product to a
+      # (0, 0) term, which is exactly zero, algebraically, regardless of the
+      # query point. This is documented behaviour, not a special case: it
+      # only arises for input no real Hue bridge sends (every gamut on the
+      # reference bridge is a proper triangle — see the moduledoc).
       assert Gamut.contains?(@degenerate, {0.3, 0.3})
       assert Gamut.contains?(@degenerate, {0.9, 0.9})
     end
 
-    test "clamp/2 on a zero-length edge does not divide by zero" do
+    test "contains?/2 on a collinear-but-distinct gamut tests the infinite line, not the segment" do
+      # Only two coincide (or none, but all three lie on one line) — that is
+      # a different degeneracy than the fully-identical case above, and the
+      # docstring is explicit that it behaves differently: the sign test
+      # answers whether the point is on the line the primaries describe, not
+      # whether it falls between them.
+      refute Gamut.contains?(@collinear, {0.25, 0.3})
+      assert Gamut.contains?(@collinear, {2.0, 2.0})
+
+      refute Gamut.contains?(@two_coincide, {0.1, 0.9})
+      assert Gamut.contains?(@two_coincide, {0.3, 0.3})
+    end
+
+    test "clamp/2 on a fully-degenerate gamut never reaches the projection code at all" do
+      # contains?/2 is unconditionally true for this gamut (see above), so
+      # clamp/2 always takes its early "already inside" branch and never
+      # calls closest_on_segment/2 — this test proves that branch, not the
+      # zero-length-edge guard inside the projection. See the next test for
+      # that.
       assert Gamut.clamp(@degenerate, {0.9, 0.9}) == {0.9, 0.9}
+    end
+
+    test "clamp/2 on a gamut with one zero-length edge does not divide by zero" do
+      # {0.1, 0.9} is off the line through the two-coincide gamut's
+      # primaries, so contains?/2 is false and clamp/2 must actually project
+      # onto all three "edges" — including the zero-length red-green edge,
+      # where closest_on_segment/2's length_squared == 0 guard is what
+      # stands between this call and a division by zero.
+      refute Gamut.contains?(@two_coincide, {0.1, 0.9})
+
+      clamped = Gamut.clamp(@two_coincide, {0.1, 0.9})
+
+      assert Gamut.contains?(@two_coincide, clamped)
     end
   end
 
@@ -144,6 +176,16 @@ defmodule Hue.Color.GamutTest do
       light = %{"color" => %{}}
 
       assert Gamut.from_light(light) == {:error, :invalid_gamut}
+    end
+
+    test "returns an error, not nil, when color is present but is not a map" do
+      # A non-map "color" value still asserts the light has colour data —
+      # just not in a shape this module can read. Per t:from_light_error/0,
+      # that is the malformed case, not "no colour capability", so it must
+      # not be indistinguishable from a light that omits "color" entirely.
+      assert Gamut.from_light(%{"color" => "oops"}) == {:error, :invalid_gamut}
+      assert Gamut.from_light(%{"color" => 5}) == {:error, :invalid_gamut}
+      assert Gamut.from_light(%{"color" => ["x"]}) == {:error, :invalid_gamut}
     end
   end
 

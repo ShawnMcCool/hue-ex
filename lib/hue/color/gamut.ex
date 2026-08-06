@@ -103,10 +103,10 @@ defmodule Hue.Color.Gamut do
       capability; this is expected and common (two lights on the reference
       bridge are dimmable-only).
 
-  Anything else under `"color"` — a malformed `gamut` object, or a
-  `gamut_type` this module does not recognise — is `{:error,
-  :invalid_gamut}`, never a crash and never conflated with the "no colour
-  support" `nil` case. See `t:from_light_error/0`.
+  Anything else under `"color"` — a malformed `gamut` object, a `gamut_type`
+  this module does not recognise, or a `"color"` value that is not even a
+  map — is `{:error, :invalid_gamut}`, never a crash and never conflated
+  with the "no colour support" `nil` case. See `t:from_light_error/0`.
   """
   @spec from_light(map()) :: t() | nil | from_light_error()
   def from_light(%{"color" => color}) when is_map(color) do
@@ -116,6 +116,12 @@ defmodule Hue.Color.Gamut do
       _ -> {:error, :invalid_gamut}
     end
   end
+
+  # "color" is present but is not even a map (a string, a number, a list,
+  # …). The light is asserting it has colour data, just not in a shape this
+  # module can read — that is the malformed case documented above, not "no
+  # colour capability", so it must not fall through to the nil clause below.
+  def from_light(%{"color" => _non_map_color}), do: {:error, :invalid_gamut}
 
   def from_light(_light), do: nil
 
@@ -127,13 +133,26 @@ defmodule Hue.Color.Gamut do
   a hair outside an edge it is mathematically on still reads as inside — see
   the moduledoc.
 
-  A degenerate, zero-area `gamut` (its three primaries collinear, or
-  identical) makes every cross product exactly zero regardless of `point`,
-  so this returns `true` unconditionally for such a gamut. That is an
-  honest consequence of the algorithm, not a special case handled here: a
-  sign test has nothing to test against on a shape with no area. No real
-  Hue bridge reports a degenerate gamut (every gamut on the reference bridge
-  is a proper triangle).
+  A degenerate, zero-area `gamut` behaves in two different ways depending on
+  *which* primaries coincide, and neither is "the triangle's interior" —
+  there is no interior to test:
+
+    * If all **three** primaries are the same point, all three cross
+      products collapse to `(0, 0)` terms and are exactly zero for every
+      `point`, so this returns `true` unconditionally.
+    * If only **two** coincide (or all three are merely collinear, no two
+      equal), the three primaries still describe a single infinite line —
+      two of the three "edges" run along it and the third is the zero-length
+      one between the coincident pair (or none, if none coincide). The test
+      then answers whether `point` lies on *that infinite line*, not
+      whether it lies between the primaries: a point on the line but far
+      outside the segment they span still reads as `true`, and any point
+      off the line reads `false`.
+
+  Both are an honest consequence of the algorithm, not a special case
+  handled here: a sign test has nothing to test against on a shape with no
+  area. No real Hue bridge reports a degenerate gamut (every gamut on the
+  reference bridge is a proper triangle).
   """
   @spec contains?(t(), point()) :: boolean()
   def contains?(%{red: r, green: g, blue: b}, point) do
