@@ -243,6 +243,25 @@ so it surfaces as an error the consumer must resolve by explicitly re-trusting �
 `Hue.Client.trust_new_certificate/1`. `verify: :none` remains available for
 people who want `aiohue`'s behaviour, and is never the default.
 
+**Discovered during implementation: TLS session resumption silently bypasses the
+pin.** Installing a `verify_fun` is necessary but not sufficient. Once one
+`verify_peer` connection to a `host:port` succeeds, OTP caches the session, and
+the next connection to the same endpoint resumes it through an abbreviated
+handshake in which the server presents **no certificate at all**. `verify_fun` is
+therefore never called, and the stored fingerprint is never consulted: a second
+client carrying a completely wrong pin connects and talks to the bridge, with no
+error and no alert. The pin degrades to a one-shot check on the first connection
+of the run. The bridge negotiates TLS 1.2 with session-id resumption — confirmed
+independently of this library with `openssl s_client -reconnect`, which reports
+`Reused` against an identical Session-ID. The constraint is therefore that
+**every** branch of `Hue.Transport.ssl_options/1`, the unpinned first-contact
+branch included, must carry `reuse_sessions: false` and `session_tickets:
+:disabled` — the first covers TLS 1.2 session ids, the second TLS 1.3 PSK
+tickets. The cost is a full handshake per connection rather than only the first,
+which on a LAN is a few round trips and one RSA verification. A fixture suite
+cannot catch this: each synthetic listener gets a fresh port and so has no
+session to resume.
+
 | Method | Works on | Fails on | Cost |
 |---|---|---|---|
 | mDNS `_hue._tcp.local` | Flat home LAN | Routed subnets, VLANs, containers | None |
