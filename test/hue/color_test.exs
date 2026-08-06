@@ -51,6 +51,10 @@ defmodule Hue.ColorTest do
     {:ok, hex} = Color.to_hex({0.5, 0.4})
 
     assert hex =~ ~r/\A#[0-9a-f]{6}\z/
+    # Pinned so this test cannot pass against a to_hex/1 that ignores its
+    # input: {0.5, 0.4} has one deterministic answer under the invented
+    # yY: 1.0, and this is it.
+    assert hex == "#ffd665"
   end
 
   describe "to_xy/2 against every published gamut type" do
@@ -102,10 +106,16 @@ defmodule Hue.ColorTest do
       assert is_float(y)
     end
 
-    test "propagates a to_xy/2 failure" do
+    test "propagates a to_xy/2 :not_color_capable failure" do
       white = "light" |> Hue.Fixtures.resources() |> Enum.find(&(not Map.has_key?(&1, "color")))
 
       assert {:error, %Hue.Error{reason: :not_color_capable}} = Color.payload("#ff8800", white)
+    end
+
+    test "propagates a to_xy/2 :invalid_gamut failure" do
+      light = %{"id" => "malformed", "color" => %{"gamut_type" => "D"}}
+
+      assert {:error, %Hue.Error{reason: :invalid_gamut}} = Color.payload("#ff8800", light)
     end
   end
 
@@ -143,10 +153,41 @@ defmodule Hue.ColorTest do
   end
 
   describe "to_hex/1" do
-    test "is honest that it is approximate, not a lossless round trip" do
-      {:ok, hex} = Color.to_hex({0.3, 0.6})
+    test "a fully saturated primary round-trips back to itself" do
+      # The sRGB green primary's chromaticity converts to full-luminance
+      # green both ways, so this is the one case where "not a lossless
+      # round trip" is, in practice, lossless.
+      assert {:ok, "#00ff00"} = Color.to_hex({0.30, 0.60})
+    end
 
-      assert hex =~ ~r/\A#[0-9a-f]{6}\z/
+    test "the same chromaticity produces the same hex at every luminance" do
+      # #000000, a mid grey, and #ffffff are all achromatic — three
+      # different luminances sharing one chromaticity, the D65 white
+      # point. to_hex/1 has no luminance channel to distinguish them, so
+      # it must answer identically for all three. Deriving the inputs
+      # through the real hex -> xy path (rather than hand-picking two xy
+      # literals) is what pins the *documented* collapse instead of some
+      # other coincidental equality.
+      {:ok, dark} = Elixir.Color.convert("#000000", Elixir.Color.XyY)
+      {:ok, mid} = Elixir.Color.convert("#808080", Elixir.Color.XyY)
+
+      assert {:ok, dark_hex} = Color.to_hex({dark.x, dark.y})
+      assert {:ok, mid_hex} = Color.to_hex({mid.x, mid.y})
+
+      assert dark_hex == mid_hex
+    end
+
+    test "genuinely different chromaticities produce different hex" do
+      assert {:ok, red} = Color.to_hex({0.64, 0.33})
+      assert {:ok, green} = Color.to_hex({0.30, 0.60})
+
+      assert red != green
+    end
+
+    test "black in means white out — the documented surprise" do
+      {:ok, %Elixir.Color.XyY{x: x, y: y}} = Elixir.Color.convert("#000000", Elixir.Color.XyY)
+
+      assert {:ok, "#ffffff"} = Color.to_hex({x, y})
     end
   end
 

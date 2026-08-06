@@ -12,9 +12,14 @@ defmodule Hue.Color do
 
   ## On accuracy
 
-  `to_hex/1` is **approximate**. A chromaticity pair carries no luminance, so
-  converting back to RGB requires inventing one. It is good enough for a
-  swatch in a user interface and is not a lossless round trip.
+  `to_hex/1` is not "a shade off" — it discards luminance entirely and
+  always answers with the brightest colour of the given hue. An xy pair
+  carries no luminance, so converting back to RGB requires inventing one,
+  and this invents the maximum (`yY: 1.0`). Two colours that differ only in
+  brightness — `#000000`, `#808080`, and `#ffffff` are all achromatic, so
+  they share one chromaticity, the D65 white point — convert to the exact
+  same hex: **`#000000` becomes `#ffffff`**. Use it to show *which* colour
+  a light is set to, never *how bright*.
 
   ## Bridge-data errors versus caller bugs
 
@@ -141,10 +146,14 @@ defmodule Hue.Color do
   end
 
   @doc """
-  Converts an xy pair to an approximate hex string, for display only.
+  Converts an xy pair to a hex string, for display only.
 
-  See the moduledoc's "On accuracy" section — a chromaticity pair carries no
-  luminance, so this invents one (`yY: 1.0`) rather than round-tripping it.
+  Not a lossless round trip: an xy pair carries no luminance, so this
+  invents the maximum (`yY: 1.0`) and always answers with the brightest
+  colour of that hue. Every achromatic input — `{0.3127, 0.3290}`, the D65
+  white point that `#000000`, any grey, and `#ffffff` all share — comes back
+  `"#ffffff"`. See the moduledoc's "On accuracy" section. Good for showing
+  *which* colour a light is set to; never use it to judge brightness.
   """
   @spec to_hex(Gamut.point()) :: {:ok, String.t()} | {:error, Error.t()}
   def to_hex({x, y}) do
