@@ -31,6 +31,16 @@ defmodule Hue.Client do
   carry a client. That is the whole of the guarantee. `inspect(client,
   structs: false)` prints the raw struct, and an `erl_crash.dump` writes heap
   terms with no involvement from `Inspect` at all.
+
+  The escape most likely to be reached in practice is neither of those. The key
+  travels as a `hue-application-key` request header, and Finch puts the whole
+  request — headers included — in the metadata of `[:finch, :send, :start]`,
+  `[:finch, :send, :stop]`, `[:finch, :recv, :start]`, and
+  `[:finch, :recv, :stop]`. Attaching a handler that logs Finch telemetry is a
+  routine thing to do, and such a handler logs the key. This library's own
+  `[:hue, :request]` events carry only `:method`, `:path`, and `:result`, but
+  the Finch events underneath them are not ours to redact. Filter the header in
+  the handler.
   """
 
   @type t :: %__MODULE__{
