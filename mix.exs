@@ -13,6 +13,9 @@ defmodule Hue.MixProject do
       start_permanent: Mix.env() == :prod,
       deps: deps(),
       aliases: aliases(),
+      # precommit runs dialyzer in :test, where test/support is compiled and
+      # calls into ExUnit.
+      dialyzer: [plt_add_apps: [:ex_unit]],
       description: description(),
       package: package(),
       docs: docs(),

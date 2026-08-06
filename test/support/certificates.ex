@@ -105,4 +105,56 @@ defmodule Hue.Certificates do
 
     port
   end
+
+  @response """
+  HTTP/1.1 200 OK\r
+  content-type: application/json\r
+  content-length: 11\r
+  connection: close\r
+  \r
+  {"data":[]}\
+  """
+
+  @doc """
+  Runs a TLS listener presenting the given bridge certificate that answers any
+  request with a fixed JSON body, and returns its port.
+
+  Enough of an HTTP server for a client to make a real request through Req,
+  Finch, and Mint against a certificate shaped like a bridge's — which is the
+  only way to observe what the TLS options do once those three have merged
+  their own defaults into them.
+  """
+  def start_bridge_https_listener(common_name \\ "0011223344556677") do
+    {:ok, listen} =
+      :ssl.listen(0,
+        cert: der(common_name),
+        key: {:PrivateKeyInfo, key(common_name)},
+        reuseaddr: true,
+        active: false,
+        packet: :raw,
+        mode: :binary
+      )
+
+    {:ok, {_address, port}} = :ssl.sockname(listen)
+
+    acceptor = spawn(fn -> serve(listen) end)
+
+    ExUnit.Callbacks.on_exit(fn ->
+      Process.exit(acceptor, :kill)
+      :ssl.close(listen)
+    end)
+
+    port
+  end
+
+  defp serve(listen) do
+    with {:ok, pending} <- :ssl.transport_accept(listen, 5000),
+         {:ok, socket} <- :ssl.handshake(pending, 5000),
+         {:ok, _request} <- :ssl.recv(socket, 0, 5000) do
+      :ssl.send(socket, @response)
+      :ssl.close(socket)
+    end
+
+    serve(listen)
+  end
 end
