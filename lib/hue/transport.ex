@@ -30,6 +30,10 @@ defmodule Hue.Transport do
   connect, read the certificate with `:ssl.peercert/1`, store `fingerprint/1` of
   it against the bridge id from `common_name/1`, and pin every connection after
   that.
+
+  `capture_certificate/3` is that connection, packaged. `Hue.Discovery.identify/2`
+  makes it once per bridge and pins everything afterwards — including its own
+  `/api/config` request — to what came back.
   """
 
   require Record
@@ -49,6 +53,7 @@ defmodule Hue.Transport do
   @common_name_oid {2, 5, 4, 3}
   @known_options [:fingerprint, :verify]
   @fingerprint_length 64
+  @capture_timeout 5_000
 
   @typedoc "A certificate as DER bytes, or as the record OTP's `:ssl` passes to a `verify_fun`."
   @type certificate :: binary() | tuple()
@@ -227,6 +232,61 @@ defmodule Hue.Transport do
     case options[:fingerprint] do
       nil -> [verify: :verify_none]
       fingerprint -> pinned_options(normalize_fingerprint(fingerprint))
+    end
+  end
+
+  @doc """
+  **First contact only.** Opens a TLS connection to `host:port` with
+  verification off, reads the certificate the server presented, and closes.
+  Returns the leaf certificate's DER bytes.
+
+  This is the one call in the library that talks to a bridge without a pin, and
+  it exists solely to produce the pin. Feed the result to `fingerprint/1` and
+  `common_name/1`, store both, and use `ssl_options/1` with a `:fingerprint`
+  from then on. It does not decide anything and it does not remember anything:
+  deciding whether the certificate may be trusted is the caller's job, and on
+  the first connection there is nothing to decide it against.
+
+  Nothing about the pinned path changes as a result of this function existing.
+  It borrows `ssl_options/1`'s no-fingerprint branch rather than assembling
+  weaker options of its own, so there is exactly one definition of "unverified"
+  in this module and no `verify_fun` anywhere that returns `:valid` without
+  comparing a pin.
+
+  It connects separately rather than reaching into the connection Req is about
+  to make. Capturing during Req's own handshake would mean installing a
+  `verify_fun` that accepts every certificate and records it as a side effect —
+  a function whose whole purpose is to trust anything, sitting one keyword away
+  from `verify_pinned/4` in a module about verification — and would additionally
+  depend on `:ssl` running the callback in the calling process, which is a
+  Finch/NimblePool implementation detail rather than a guarantee. The cost is
+  one extra connection, once per bridge, ever.
+
+  ## Options
+
+    * `:timeout` — milliseconds to wait for the handshake. Defaults to
+      `#{@capture_timeout}`.
+
+  Returns `{:error, reason}` with `:ssl`'s own reason term for a connection or
+  handshake that did not complete.
+  """
+  @spec capture_certificate(String.t(), :inet.port_number(), keyword()) ::
+          {:ok, binary()} | {:error, term()}
+  def capture_certificate(host, port, options \\ [])
+      when is_binary(host) and is_integer(port) and port > 0 do
+    timeout = Keyword.get(options, :timeout, @capture_timeout)
+    connect_options = Keyword.put(ssl_options(), :active, false)
+
+    case :ssl.connect(String.to_charlist(host), port, connect_options, timeout) do
+      {:ok, socket} ->
+        try do
+          :ssl.peercert(socket)
+        after
+          :ssl.close(socket)
+        end
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

@@ -106,14 +106,7 @@ defmodule Hue.Certificates do
     port
   end
 
-  @response """
-  HTTP/1.1 200 OK\r
-  content-type: application/json\r
-  content-length: 11\r
-  connection: close\r
-  \r
-  {"data":[]}\
-  """
+  @default_body ~s({"data":[]})
 
   @doc """
   Runs a TLS listener presenting the given bridge certificate that answers any
@@ -123,8 +116,18 @@ defmodule Hue.Certificates do
   Finch, and Mint against a certificate shaped like a bridge's — which is the
   only way to observe what the TLS options do once those three have merged
   their own defaults into them.
+
+  ## Options
+
+    * `:body` — the JSON body to answer with. Defaults to `#{@default_body}`.
+    * `:status` — the status code and reason phrase for the status line, as a
+      tuple. Defaults to `{200, "OK"}`.
+
+  The listener also tolerates a client that completes the handshake and
+  disconnects without sending a request, which is exactly what
+  `Hue.Transport.capture_certificate/3` does at first contact.
   """
-  def start_bridge_https_listener(common_name \\ "0011223344556677") do
+  def start_bridge_https_listener(common_name \\ "0011223344556677", options \\ []) do
     {:ok, listen} =
       :ssl.listen(0,
         cert: der(common_name),
@@ -137,7 +140,8 @@ defmodule Hue.Certificates do
 
     {:ok, {_address, port}} = :ssl.sockname(listen)
 
-    acceptor = spawn(fn -> serve(listen) end)
+    response = response(options)
+    acceptor = spawn(fn -> serve(listen, response) end)
 
     ExUnit.Callbacks.on_exit(fn ->
       Process.exit(acceptor, :kill)
@@ -147,14 +151,24 @@ defmodule Hue.Certificates do
     port
   end
 
-  defp serve(listen) do
+  defp response(options) do
+    body = Keyword.get(options, :body, @default_body)
+    {code, reason} = Keyword.get(options, :status, {200, "OK"})
+
+    "HTTP/1.1 #{code} #{reason}\r\n" <>
+      "content-type: application/json\r\n" <>
+      "content-length: #{byte_size(body)}\r\n" <>
+      "connection: close\r\n\r\n" <> body
+  end
+
+  defp serve(listen, response) do
     with {:ok, pending} <- :ssl.transport_accept(listen, 5000),
          {:ok, socket} <- :ssl.handshake(pending, 5000),
          {:ok, _request} <- :ssl.recv(socket, 0, 5000) do
-      :ssl.send(socket, @response)
+      :ssl.send(socket, response)
       :ssl.close(socket)
     end
 
-    serve(listen)
+    serve(listen, response)
   end
 end

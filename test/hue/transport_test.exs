@@ -398,6 +398,61 @@ defmodule Hue.TransportTest do
     end
   end
 
+  describe "capture_certificate/3" do
+    @describetag :capture_log
+
+    test "returns the exact bytes the server presented" do
+      {der, fingerprint} = Hue.Certificates.bridge_certificate()
+      port = Hue.Certificates.start_bridge_listener()
+
+      assert {:ok, captured} = Transport.capture_certificate("127.0.0.1", port)
+
+      assert captured == der
+      assert Transport.fingerprint(captured) == fingerprint
+      assert Transport.common_name(captured) == "0011223344556677"
+    end
+
+    test "captures a certificate signed by an authority it has never heard of" do
+      {der, fingerprint} = Hue.Certificates.bridge_certificate("00178800AABBCCDD")
+      port = Hue.Certificates.start_bridge_listener("00178800AABBCCDD")
+
+      assert {:ok, ^der} = Transport.capture_certificate("127.0.0.1", port)
+      assert Transport.fingerprint(der) == fingerprint
+    end
+
+    test "the pin it produces is the one ssl_options/1 then accepts" do
+      port = Hue.Certificates.start_bridge_https_listener()
+
+      assert {:ok, der} = Transport.capture_certificate("127.0.0.1", port)
+
+      {:ok, client} =
+        Hue.new("127.0.0.1", port: port, fingerprint: Transport.fingerprint(der), retry: false)
+
+      assert {:ok, %Req.Response{status: 200}} =
+               Req.request(Req.merge(client.req, method: :get, url: client.base_url))
+    end
+
+    test "reports a refused connection rather than raising" do
+      {:ok, socket} = :gen_tcp.listen(0, [])
+      {:ok, port} = :inet.port(socket)
+      :gen_tcp.close(socket)
+
+      assert {:error, reason} = Transport.capture_certificate("127.0.0.1", port, timeout: 1_000)
+      assert reason in [:econnrefused, :timeout]
+    end
+
+    test "it does not weaken what ssl_options/1 hands out" do
+      # The capture path uses the no-fingerprint branch as-is, so nothing about
+      # the pinned branch can drift as a side effect of capturing.
+      {_der, fingerprint} = Hue.Certificates.bridge_certificate()
+
+      assert Transport.ssl_options() == [verify: :verify_none]
+
+      assert Keyword.fetch!(Transport.ssl_options(fingerprint: fingerprint), :verify) ==
+               :verify_peer
+    end
+  end
+
   # Connects with ssl_options/1's exact output, wrapping verify_fun only to
   # record events; it still delegates to verify_pinned/4 unchanged, so what is
   # observed is what the real options do.

@@ -35,6 +35,7 @@ defmodule Hue.Error do
           | :bridge_busy
           | :unsupported_bridge
           | :certificate_changed
+          | :bridge_identity_mismatch
           | :unexpected_verification_event
           | :not_dimmable
           | :not_color_capable
