@@ -39,6 +39,7 @@ defmodule Hue.Error do
           | :unexpected_verification_event
           | :not_dimmable
           | :not_color_capable
+          | :invalid_gamut
           | :no_grouped_light
           | :timeout
           | :econnrefused
