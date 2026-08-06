@@ -33,6 +33,16 @@ defmodule Hue.Resource do
   reflecting what the *caller* receives — including a domain-level
   reinterpretation such as `get/4` collapsing an empty result to `:not_found`,
   not just the wire-level HTTP outcome.
+
+  ## Trust boundary
+
+  `type` and `rid` are interpolated straight into the request path with no
+  escaping. A `rid` from a less-trusted source could contain something like
+  `../` and redirect the request elsewhere on the same bridge. The blast
+  radius is bounded by whatever the application key itself can reach — this
+  is not a privilege escalation — but `rid`s are expected to come from the
+  bridge (a prior `list/3`, `get/4`, or `create/4` response), not from
+  end-user input passed straight through.
   """
 
   alias Hue.Client
@@ -49,15 +59,19 @@ defmodule Hue.Resource do
   @spec list(Client.t(), type(), keyword()) ::
           {:ok, list()} | {:ok, list(), list()} | {:error, Error.t()}
   def list(%Client{} = client, type, options \\ []) when is_atom(type) do
-    request(client, :get, "/resource/#{type}", nil, options, & &1)
+    request(client, :get, "/resource/#{type}", nil, nil, options, & &1)
   end
 
   @doc """
   Fetches one resource by rid.
 
-  Returns `{:error, %Hue.Error{reason: :not_found}}` when the bridge answers
-  with an HTTP 200 and an empty `data` array — CLIP v2's way of reporting a
-  rid that does not exist, rather than a 404.
+  Returns `{:error, %Hue.Error{reason: :not_found, rid: rid}}` for a rid that
+  does not exist. Observed firmware `1.78.0` on a BSB002 answers a missing
+  rid, a malformed rid, and an unknown resource type all with HTTP 404 and a
+  JSON `errors` body (probed 2026-08-06) — that is the path this actually
+  takes. An HTTP 200 with an empty `data` array is handled too, defensively:
+  it is a shape the CLIP v2 schema permits, even though no probe against real
+  hardware has produced it.
 
   Does not accept `return: :detailed` — see the moduledoc.
   """
@@ -71,7 +85,7 @@ defmodule Hue.Resource do
               "list/3 instead if you need them"
     end
 
-    request(client, :get, "/resource/#{type}/#{rid}", nil, options, &pick_one(&1, rid))
+    request(client, :get, "/resource/#{type}/#{rid}", nil, rid, options, &pick_one(&1, rid))
   end
 
   @doc """
@@ -84,7 +98,7 @@ defmodule Hue.Resource do
           :ok | {:ok, list(), list()} | {:error, Error.t()}
   def update(%Client{} = client, type, rid, body, options \\ [])
       when is_atom(type) and is_binary(rid) and is_map(body) do
-    request(client, :put, "/resource/#{type}/#{rid}", body, options, &to_write_result/1)
+    request(client, :put, "/resource/#{type}/#{rid}", body, rid, options, &to_write_result/1)
   end
 
   @doc "Creates a resource."
@@ -92,7 +106,7 @@ defmodule Hue.Resource do
           {:ok, list()} | {:ok, list(), list()} | {:error, Error.t()}
   def create(%Client{} = client, type, body, options \\ [])
       when is_atom(type) and is_map(body) do
-    request(client, :post, "/resource/#{type}", body, options, & &1)
+    request(client, :post, "/resource/#{type}", body, nil, options, & &1)
   end
 
   @doc """
@@ -105,10 +119,19 @@ defmodule Hue.Resource do
           :ok | {:ok, list(), list()} | {:error, Error.t()}
   def delete(%Client{} = client, type, rid, options \\ [])
       when is_atom(type) and is_binary(rid) do
-    request(client, :delete, "/resource/#{type}/#{rid}", nil, options, &to_write_result/1)
+    request(client, :delete, "/resource/#{type}/#{rid}", nil, rid, options, &to_write_result/1)
   end
 
   defp pick_one({:ok, [resource]}, _rid), do: {:ok, resource}
+
+  # Observed firmware 1.78.0 on a BSB002 answers a missing rid, a malformed
+  # rid, and an unknown resource type all with HTTP 404 and a JSON `errors`
+  # body (probed 2026-08-06) -- so this clause does not fire against real
+  # hardware; that 404 instead becomes `{:error, %Error{reason: :not_found}}`
+  # from `Error.from_response/4` by way of `do_request/6`, and reaches
+  # `pick_one/2` through its `other -> other` clause below. This clause is
+  # retained anyway: an HTTP 200 with an empty `data` array is a shape the
+  # CLIP v2 API schema permits, and the cost of handling it is one clause.
   defp pick_one({:ok, []}, rid), do: {:error, %Error{reason: :not_found, rid: rid}}
   defp pick_one(other, _rid), do: other
 
@@ -118,12 +141,12 @@ defmodule Hue.Resource do
   # Telemetry wraps the whole public call, `interpret` included, so the stop
   # event's `:result` reflects what the caller actually gets back — not just
   # whether the HTTP round trip itself succeeded.
-  defp request(%Client{} = client, method, path, body, options, interpret) do
+  defp request(%Client{} = client, method, path, body, rid, options, interpret) do
     validate_options!(options)
     metadata = %{method: method, path: path}
 
     :telemetry.span([:hue, :request], metadata, fn ->
-      result = client |> do_request(method, path, body, options) |> interpret.()
+      result = client |> do_request(method, path, body, rid, options) |> interpret.()
       {result, Map.put(metadata, :result, outcome(result))}
     end)
   end
@@ -138,7 +161,7 @@ defmodule Hue.Resource do
   defp outcome({:ok, _data, _errors}), do: :ok
   defp outcome({:error, _error}), do: :error
 
-  defp do_request(client, method, path, body, options) do
+  defp do_request(client, method, path, body, rid, options) do
     request =
       client.req
       |> Req.merge(
@@ -154,7 +177,7 @@ defmodule Hue.Resource do
         decode(raw_body, Keyword.get(options, :return, :simple))
 
       {:ok, %Req.Response{status: status, body: raw_body} = response} ->
-        {:error, Error.from_response(status, raw_body, content_type(response))}
+        {:error, Error.from_response(status, raw_body, content_type(response), rid: rid)}
 
       {:error, %{reason: reason}} ->
         {:error, Error.transport(reason)}

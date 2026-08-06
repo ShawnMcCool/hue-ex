@@ -40,6 +40,45 @@ defmodule Hue.ResourceTest do
              Resource.get(client, :light, "missing-rid")
   end
 
+  # Recorded from a real BSB002 on firmware 1.78.0, which answers a missing,
+  # malformed, or unknown-type rid with HTTP 404 and this JSON body rather
+  # than HTTP 200 with an empty data array. This is the path get/4 actually
+  # takes against real hardware; it also proves the rid the caller asked for
+  # reaches the resulting Error, not just the description the bridge sent.
+  test "a real 404 becomes :not_found with the rid attached", %{client: client} do
+    Req.Test.stub(__MODULE__, fn conn ->
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.send_resp(404, Hue.Fixtures.raw("not_found_404.json"))
+    end)
+
+    assert {:error,
+            %Error{reason: :not_found, status: 404, description: "Not Found", rid: "missing-rid"}} =
+             Resource.get(client, :light, "missing-rid")
+  end
+
+  test "update/5 attaches the rid to a real 404 too", %{client: client} do
+    Req.Test.stub(__MODULE__, fn conn ->
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.send_resp(404, Hue.Fixtures.raw("not_found_404.json"))
+    end)
+
+    assert {:error, %Error{reason: :not_found, rid: "missing-rid"}} =
+             Resource.update(client, :light, "missing-rid", %{"on" => %{"on" => true}})
+  end
+
+  test "delete/4 attaches the rid to a real 404 too", %{client: client} do
+    Req.Test.stub(__MODULE__, fn conn ->
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.send_resp(404, Hue.Fixtures.raw("not_found_404.json"))
+    end)
+
+    assert {:error, %Error{reason: :not_found, rid: "missing-rid"}} =
+             Resource.delete(client, :light, "missing-rid")
+  end
+
   test "get/4 refuses return: :detailed, since there is no data list for errors to sit beside", %{
     client: client
   } do
