@@ -62,9 +62,14 @@ assumptions.
   **the CN is the bridge ID** — issued by `C=NL, O=Philips Hue, CN=root-bridge`,
   valid to 2038, and carries **no subjectAltName**.
 - Therefore **ordinary TLS hostname verification cannot succeed**. Modern
-  verifiers reject SAN-less certificates, and the CN is not an address. The only
-  correct options are `verify_peer` against the Signify root with a custom
-  `match_fun` comparing CN to an expected bridge ID, or `verify_none`.
+  verifiers reject SAN-less certificates, and the CN is not an address.
+- **The bridge sends only its leaf certificate.** No intermediate, no root:
+  `openssl s_client` reports `verify error:num=20: unable to get local issuer
+  certificate`. The issuing root cannot be obtained from the connection, and
+  Signify publishes it only behind a developer-portal login.
+- For reference, `aiohue` — the client Home Assistant ships, and the most mature
+  implementation in any language — sets `ssl=False` and does not verify the
+  bridge at all. The de facto industry practice is no verification.
 - `GET /api/config` responds **unauthenticated, HTTP 200, `application/json`**
   with `bridgeid`, `modelid`, `apiversion`, and `mac`. This is what makes
   pinning bootstrappable.
@@ -166,7 +171,7 @@ use.
 ── Layer 1: protocol ──────────────────────────────────────────
 Hue                 new/2, from_bridge/2
 Hue.Client          struct: base_url, application_key, bridge_id, Req.Request
-Hue.Transport       TLS: bundled Signify root + match_fun pinning bridge_id
+Hue.Transport       TLS: SPKI pinning via verify_fun, trust-on-first-use
 Hue.Resource        generic CRUD, all types: list/2 get/3 update/4 create/3 delete/3
 Hue.Pairing         link-button flow → application_key + clientkey
 Hue.Discovery       mDNS ‖ cloud ‖ manual → %Hue.Bridge.Info{}
@@ -199,19 +204,44 @@ survive someone renaming a room in the Hue app.
 
 ### Discovery and TLS are one problem
 
-The certificate can only be verified against a bridge ID that is not known until
-the bridge has been contacted. `GET /api/config` supplies it unauthenticated over
-the very connection that cannot yet be verified. The resolution is
-trust-on-first-use:
+The bridge cannot be verified by any conventional means: its certificate has no
+SAN, its CN is an opaque bridge ID rather than an address, and the issuing root
+is neither sent on the wire nor publicly downloadable. Verification therefore
+has to be bootstrapped from the first connection.
+
+**The library pins the bridge's public key on first use** — the SSH host-key
+model, not the web PKI model. This needs no bundled certificate authority, keeps
+working if Signify rotates its root, and detects interception on every connection
+after the first.
 
 1. Obtain a candidate address by any method below.
 2. `GET /api/config` with verification disabled — confirms it is a Hue bridge,
    yields `bridgeid` and `modelid`.
 3. Reject `BSB001`.
-4. Persist `bridgeid` alongside the host. **This is the trust decision**, and it
-   happens once.
-5. Every subsequent connection uses `verify_peer` against the bundled Signify
-   root with a `match_fun` pinning that exact bridge ID.
+4. Capture the leaf certificate's **SHA-256 DER fingerprint**, and check its CN
+   equals the reported `bridgeid`. Persist host, `bridgeid`, and fingerprint
+   together. **This is the trust decision**, and it happens exactly once.
+5. Every subsequent connection verifies the presented certificate against the
+   stored fingerprint via a `verify_fun`, and fails closed with
+   `:certificate_changed` on mismatch.
+
+Pinning the whole certificate rather than its public key is the right trade here:
+the bridge's certificate is issued at manufacture and runs to 2038, so key
+rotation behind a stable certificate is not a case that occurs, and whole-DER
+comparison is markedly simpler to implement correctly against OTP's `:ssl`
+records.
+
+Trust-on-first-use is weaker than a real chain: an attacker present *during*
+pairing is not detected. It is materially stronger than what every other Hue
+client does, and the honest framing belongs in the README rather than in a claim
+that the connection is authenticated. The window is one request on a home LAN,
+at a moment the user chose.
+
+A changed fingerprint is not silently accepted. It means either a factory-reset
+bridge or an interception attempt, and the two are indistinguishable from here,
+so it surfaces as an error the consumer must resolve by explicitly re-trusting —
+`Hue.Client.trust_new_certificate/1`. `verify: :none` remains available for
+people who want `aiohue`'s behaviour, and is never the default.
 
 | Method | Works on | Fails on | Cost |
 |---|---|---|---|
@@ -353,7 +383,7 @@ no numeric error codes**:
 | `:rate_limited` | HTTP 429 |
 | `:bridge_busy` | HTTP 503 |
 | `:unsupported_bridge` | `modelid` is `BSB001` |
-| `:certificate_mismatch` | cert CN ≠ pinned bridge ID |
+| `:certificate_changed` | presented certificate ≠ pinned fingerprint |
 | `:not_synced` | `Hue.Bridge` has not completed its first fetch |
 | `:not_dimmable`, `:not_color_capable` | local capability check |
 | `:no_grouped_light` | room or zone exposes no `grouped_light` service |
@@ -409,7 +439,8 @@ Coverage must include:
 - Lights with no `dimming` and lights with no `color`.
 - Colour clamping as a **property test**: for any input colour and any of the
   three real gamuts, the result lies inside the triangle.
-- The certificate `match_fun`, against the real chain and a mismatched bridge ID.
+- Certificate pinning: fingerprinting the real leaf, acceptance on match, and
+  `:certificate_changed` on a substituted certificate.
 - Reconnect: stream drop → backoff → full refetch → cache correctness.
 
 A `@tag :live` suite is excluded by default and runs against real hardware with
@@ -420,7 +451,7 @@ A `@tag :live` suite is excluded by default and runs against real hardware with
 Runtime: `req ~> 0.7`, `jason ~> 1.4`, `server_sent_events ~> 1.1`,
 `telemetry ~> 1.0`, `color ~> 0.13`.
 
-- `req` brings Finch, which is what makes the TLS `match_fun` reachable via
+- `req` brings Finch, which is what makes the TLS `verify_fun` reachable via
   `connect_options: [transport_opts: …]`, and `Req.Test` is the stubbing seam.
 - `server_sent_events` (251k recent downloads, MIT, maintained) is taken rather
   than hand-rolled: line-ending variants, multi-line `data:` accumulation,
@@ -431,8 +462,8 @@ Runtime: `req ~> 0.7`, `jason ~> 1.4`, `server_sent_events ~> 1.1`,
 - No mDNS package: `mdns_lite` is Nerves-oriented and starts its own supervision
   tree, which a library must not do. Discovery uses `:gen_udp` with OTP's
   `:inet_dns` for packet coding.
-- No `castore`: Mozilla's bundle does not contain the Signify root, which ships
-  as a PEM in `priv/`.
+- No `castore`, and no bundled certificate authority of any kind: trust is
+  pinned per bridge on first use, so there is nothing to ship or keep current.
 
 Development: `ex_doc`, `credo`, `dialyxir`, `plug` (test only, for `Req.Test`).
 
