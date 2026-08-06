@@ -29,10 +29,12 @@ defmodule Hue do
   ## Options
 
     * `:application_key` — required for every request except `/api/config`.
-    * `:fingerprint` — the bridge's pinned certificate fingerprint. Without it,
-      TLS verification is disabled; see `Hue.Transport`.
+    * `:fingerprint` — the bridge's pinned certificate fingerprint, in any form
+      `Hue.Transport.normalize_fingerprint/1` accepts, including the
+      colon-separated uppercase one `openssl` prints. Without it, TLS
+      verification is disabled; see `Hue.Transport`.
     * `:verify` — `:none` to disable verification explicitly.
-    * `:port` — defaults to `#{@default_port}`.
+    * `:port` — a positive integer, defaults to `#{@default_port}`.
 
   Any other option goes to `Req.new/1`, including `:connect_options` — with the
   exception of its `:transport_opts`, which this library owns and which
@@ -54,10 +56,10 @@ defmodule Hue do
 
     {:ok,
      %Client{
-       base_url: base_url(host, Keyword.get(mine, :port, @default_port)),
+       base_url: base_url(host, port!(Keyword.get(mine, :port, @default_port))),
        application_key: mine[:application_key],
        bridge_id: mine[:bridge_id],
-       fingerprint: mine[:fingerprint],
+       fingerprint: normalized(mine[:fingerprint]),
        req: req
      }}
   end
@@ -68,7 +70,9 @@ defmodule Hue do
 
   The bridge's fingerprint is the pinned, trusted one, so a `:fingerprint`
   option that disagrees with it raises rather than quietly winning. Re-pin by
-  updating the `Hue.Bridge.Info`.
+  updating the `Hue.Bridge.Info`. Disagreement is judged on the normalised
+  fingerprints, so restating the pin in a different letter case or with `:`
+  separators is not a disagreement.
   """
   @spec from_bridge(Bridge.Info.t(), keyword()) :: {:ok, Client.t()}
   def from_bridge(%Bridge.Info{} = bridge, options \\ []) do
@@ -83,6 +87,15 @@ defmodule Hue do
   # contain ":443" or "443" in its name is left alone.
   defp base_url(host, @default_port), do: "https://#{host}#{@path}"
   defp base_url(host, port), do: "https://#{host}:#{port}#{@path}"
+
+  defp port!(port) when is_integer(port) and port > 0, do: port
+
+  defp port!(port) do
+    raise ArgumentError, "port must be a positive integer, got #{inspect(port)}"
+  end
+
+  defp normalized(nil), do: nil
+  defp normalized(fingerprint), do: Transport.normalize_fingerprint(fingerprint)
 
   defp pin_transport!(connect_options, ssl) do
     cond do
@@ -108,13 +121,18 @@ defmodule Hue do
       :error ->
         Keyword.put(options, :fingerprint, pinned)
 
-      {:ok, ^pinned} ->
-        options
+      {:ok, given} ->
+        agrees_with_pin!(options, given, pinned, bridge.host)
+    end
+  end
 
-      {:ok, other} ->
-        raise ArgumentError,
-              "#{bridge.host} is pinned to #{pinned}, but fingerprint: #{inspect(other)} " <>
-                "was passed — re-pin by updating the Hue.Bridge.Info, not by overriding it here"
+  defp agrees_with_pin!(options, given, pinned, host) do
+    if normalized(given) == normalized(pinned) do
+      options
+    else
+      raise ArgumentError,
+            "#{host} is pinned to #{normalized(pinned)}, but fingerprint: #{inspect(given)} " <>
+              "was passed — re-pin by updating the Hue.Bridge.Info, not by overriding it here"
     end
   end
 end

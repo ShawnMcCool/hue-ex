@@ -3,6 +3,10 @@ defmodule Hue.ClientTest do
 
   alias Hue.Bridge
 
+  # Real SHA-256 digests, because a fingerprint is required to be one.
+  @pin "21cdf48f5217f21923a498576d01c31d800424dafef70efc259f1e05134f3274"
+  @other_pin "19b0176ff5be4461cf15626db089ad5ce1af401f6cc5798055522a9a04d466e1"
+
   test "new/2 builds a client for the bridge" do
     {:ok, client} = Hue.new("192.0.2.10", application_key: "secret-key")
 
@@ -24,7 +28,7 @@ defmodule Hue.ClientTest do
   end
 
   test "a fingerprint is turned into pinned TLS options" do
-    {:ok, client} = Hue.new("192.0.2.10", application_key: "k", fingerprint: "abc")
+    {:ok, client} = Hue.new("192.0.2.10", application_key: "k", fingerprint: @pin)
 
     transport = client.req.options[:connect_options][:transport_opts]
     assert transport[:verify] == :verify_peer
@@ -58,6 +62,52 @@ defmodule Hue.ClientTest do
 
       assert client.base_url == "https://bridge-443.local:8443/clip/v2"
     end
+
+    # Bridge.Info declares pos_integer(); anything else built a url like
+    # "https://h:/clip/v2" and only failed much later, at connect time.
+    test "refuses a port that is not a positive integer" do
+      for port <- [nil, 0, -1, "8443", :eight] do
+        assert_raise ArgumentError, ~r/positive integer/, fn ->
+          Hue.new("192.0.2.10", port: port)
+        end
+      end
+    end
+  end
+
+  # The pin a user has is the one openssl printed: uppercase, colon separated.
+  # Refusing it would be reported as :certificate_changed, which this library
+  # documents as interception.
+  describe "the form a fingerprint is written in" do
+    test "does not change the pin, whichever form it arrives in" do
+      for form <- [@pin, String.upcase(@pin), colon_separated(@pin), "  #{@pin}\n"] do
+        {:ok, client} = Hue.new("192.0.2.10", fingerprint: form)
+
+        assert client.fingerprint == @pin
+        assert {_fun, @pin} = transport_options(client)[:verify_fun]
+      end
+    end
+
+    test "does not make a restated pin look like a disagreement" do
+      bridge = %Bridge.Info{host: "192.0.2.10", fingerprint: @pin}
+      openssl = @pin |> String.upcase() |> colon_separated()
+
+      assert {:ok, client} = Hue.from_bridge(bridge, fingerprint: openssl)
+      assert client.fingerprint == @pin
+    end
+
+    test "does not let a bridge pinned in one form arrive in another" do
+      bridge = %Bridge.Info{host: "192.0.2.10", fingerprint: String.upcase(@pin)}
+
+      {:ok, client} = Hue.from_bridge(bridge)
+
+      assert client.fingerprint == @pin
+    end
+
+    test "is still required to be a whole digest" do
+      assert_raise ArgumentError, ~r/64-character hex string/, fn ->
+        Hue.new("192.0.2.10", fingerprint: "abc")
+      end
+    end
   end
 
   describe "the TLS options a client carries" do
@@ -74,10 +124,10 @@ defmodule Hue.ClientTest do
     end
 
     test "supply no CA store when pinned, because trust comes from the pin" do
-      {:ok, client} = Hue.new("192.0.2.10", fingerprint: "abc123")
+      {:ok, client} = Hue.new("192.0.2.10", fingerprint: @pin)
 
       assert transport_options(client)[:cacerts] == []
-      assert {_fun, "abc123"} = transport_options(client)[:verify_fun]
+      assert {_fun, @pin} = transport_options(client)[:verify_fun]
     end
 
     test "reject a fingerprint Hue.Transport would refuse" do
@@ -88,7 +138,7 @@ defmodule Hue.ClientTest do
 
     test "reject verify: :none alongside a fingerprint" do
       assert_raise ArgumentError, ~r/contradicts/, fn ->
-        Hue.new("192.0.2.10", fingerprint: "abc123", verify: :none)
+        Hue.new("192.0.2.10", fingerprint: @pin, verify: :none)
       end
     end
   end
@@ -98,7 +148,7 @@ defmodule Hue.ClientTest do
   describe "a caller who brings their own :connect_options" do
     test "keeps them alongside the pinned transport options" do
       {:ok, client} =
-        Hue.new("192.0.2.10", fingerprint: "abc123", connect_options: [timeout: 5_000])
+        Hue.new("192.0.2.10", fingerprint: @pin, connect_options: [timeout: 5_000])
 
       assert client.req.options[:connect_options][:timeout] == 5_000
       assert transport_options(client)[:verify] == :verify_peer
@@ -107,7 +157,7 @@ defmodule Hue.ClientTest do
     test "cannot replace the transport options, because that is where the pin lives" do
       assert_raise ArgumentError, ~r/transport_opts/, fn ->
         Hue.new("192.0.2.10",
-          fingerprint: "abc123",
+          fingerprint: @pin,
           connect_options: [transport_opts: [verify: :verify_none]]
         )
       end
@@ -132,7 +182,7 @@ defmodule Hue.ClientTest do
         host: "192.0.2.10",
         port: 8443,
         bridge_id: "0011223344556677",
-        fingerprint: "abc123",
+        fingerprint: @pin,
         discovered_by: :mdns
       }
 
@@ -140,13 +190,13 @@ defmodule Hue.ClientTest do
 
       assert client.base_url == "https://192.0.2.10:8443/clip/v2"
       assert client.bridge_id == "0011223344556677"
-      assert client.fingerprint == "abc123"
+      assert client.fingerprint == @pin
       assert client.application_key == "k"
       assert transport_options(client)[:verify] == :verify_peer
     end
 
     test "passes other options through to new/2" do
-      bridge = %Bridge.Info{host: "192.0.2.10", fingerprint: "abc123"}
+      bridge = %Bridge.Info{host: "192.0.2.10", fingerprint: @pin}
 
       {:ok, client} = Hue.from_bridge(bridge, receive_timeout: 2_000)
 
@@ -157,26 +207,26 @@ defmodule Hue.ClientTest do
     # disagrees with it is a mistake, and resolving it either way silently
     # would mean a client pinned to something nobody chose.
     test "refuses a fingerprint that disagrees with the pinned one" do
-      bridge = %Bridge.Info{host: "192.0.2.10", fingerprint: "abc123"}
+      bridge = %Bridge.Info{host: "192.0.2.10", fingerprint: @pin}
 
       assert_raise ArgumentError, ~r/pinned/, fn ->
-        Hue.from_bridge(bridge, fingerprint: "def456")
+        Hue.from_bridge(bridge, fingerprint: @other_pin)
       end
     end
 
     test "accepts a fingerprint that restates the pinned one" do
-      bridge = %Bridge.Info{host: "192.0.2.10", fingerprint: "abc123"}
+      bridge = %Bridge.Info{host: "192.0.2.10", fingerprint: @pin}
 
-      assert {:ok, client} = Hue.from_bridge(bridge, fingerprint: "abc123")
-      assert client.fingerprint == "abc123"
+      assert {:ok, client} = Hue.from_bridge(bridge, fingerprint: @pin)
+      assert client.fingerprint == @pin
     end
 
     test "takes a fingerprint from the options when the bridge has none yet" do
       bridge = %Bridge.Info{host: "192.0.2.10"}
 
-      {:ok, client} = Hue.from_bridge(bridge, fingerprint: "abc123")
+      {:ok, client} = Hue.from_bridge(bridge, fingerprint: @pin)
 
-      assert client.fingerprint == "abc123"
+      assert client.fingerprint == @pin
     end
 
     test "is unverified when neither the bridge nor the caller has a pin" do
@@ -209,7 +259,7 @@ defmodule Hue.ClientTest do
       Hue.new("192.0.2.10",
         application_key: "k",
         bridge_id: "0011223344556677",
-        fingerprint: "ab"
+        fingerprint: @pin
       )
 
     output = inspect(client)
@@ -217,7 +267,7 @@ defmodule Hue.ClientTest do
     assert output =~ "#Hue.Client<"
     assert output =~ "https://192.0.2.10/clip/v2"
     assert output =~ "0011223344556677"
-    assert output =~ ~s(fingerprint: "ab")
+    assert output =~ ~s(fingerprint: "#{@pin}")
   end
 
   test "a client without an application key inspects without a redaction marker" do
@@ -228,6 +278,11 @@ defmodule Hue.ClientTest do
 
   defp transport_options(client) do
     client.req.options[:connect_options][:transport_opts]
+  end
+
+  # `21cdf4…` -> `21:cd:f4:…`, the layout openssl prints a digest in.
+  defp colon_separated(fingerprint) do
+    fingerprint |> String.graphemes() |> Enum.chunk_every(2) |> Enum.map_join(":", &Enum.join/1)
   end
 end
 
@@ -302,6 +357,26 @@ defmodule Hue.ClientTransportTest do
 
       assert {:error, exception} = get(client)
       assert inspect(exception) =~ "certificate_changed"
+    end
+
+    # The reviewer's case: the pin a user actually has is what openssl printed.
+    # Before normalisation this failed the handshake with :certificate_changed,
+    # telling the user they were being intercepted for a formatting difference.
+    test "reaches a bridge pinned in the form openssl prints" do
+      {_der, fingerprint} = Hue.Certificates.bridge_certificate()
+
+      openssl =
+        fingerprint
+        |> String.upcase()
+        |> String.graphemes()
+        |> Enum.chunk_every(2)
+        |> Enum.map_join(":", &Enum.join/1)
+
+      port = Hue.Certificates.start_bridge_https_listener()
+      {:ok, client} = Hue.new("127.0.0.1", port: port, fingerprint: openssl, retry: false)
+
+      assert {:ok, response} = get(client)
+      assert response.status == 200
     end
 
     test "reaches the real hardware shape, a leaf signed by an absent authority" do

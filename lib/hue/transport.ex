@@ -48,6 +48,7 @@ defmodule Hue.Transport do
 
   @common_name_oid {2, 5, 4, 3}
   @known_options [:fingerprint, :verify]
+  @fingerprint_length 64
 
   @typedoc "A certificate as DER bytes, or as the record OTP's `:ssl` passes to a `verify_fun`."
   @type certificate :: binary() | tuple()
@@ -63,6 +64,44 @@ defmodule Hue.Transport do
   @spec fingerprint(binary()) :: String.t()
   def fingerprint(der) when is_binary(der) do
     :sha256 |> :crypto.hash(der) |> Base.encode16(case: :lower)
+  end
+
+  @doc """
+  Folds the forms a fingerprint is plausibly written in into the one
+  `fingerprint/1` produces: lowercase, unseparated hex.
+
+  A pin is copied from somewhere, and the obvious source prints something else.
+  `openssl x509 -fingerprint -sha256` emits `21:CD:F4:8F:…` — uppercase, colon
+  separated. Comparing that to `fingerprint/1`'s output byte for byte fails, and
+  `verify_pinned/4` reports that failure as `:certificate_changed`, which this
+  module documents as "your bridge was replaced or you are being intercepted".
+  A library that fails closed and is authoritative about why must not spell a
+  transcription format the same as an attack, so the forms are folded together
+  here rather than compared as typed.
+
+  Accepts, all yielding the same pin: lowercase hex, uppercase hex, either with
+  `:` separators, and any of those with surrounding whitespace.
+
+  Anything that is not then exactly #{@fingerprint_length} hex characters raises.
+  A SHA-256 digest has one length, and a pin shorter than the digest is a pin
+  that matches more certificates than the one it was taken from.
+  """
+  @spec normalize_fingerprint(String.t()) :: String.t()
+  def normalize_fingerprint(fingerprint) when is_binary(fingerprint) do
+    normalized =
+      fingerprint |> String.trim() |> String.replace(":", "") |> String.downcase()
+
+    if String.match?(normalized, ~r/\A[0-9a-f]{#{@fingerprint_length}}\z/) do
+      normalized
+    else
+      raise ArgumentError,
+            "fingerprint must be a #{@fingerprint_length}-character hex string, " <>
+              "optionally colon-separated, got #{inspect(fingerprint)}"
+    end
+  end
+
+  def normalize_fingerprint(other) do
+    raise ArgumentError, "fingerprint must be a hex string, got #{inspect(other)}"
   end
 
   @doc """
@@ -144,15 +183,17 @@ defmodule Hue.Transport do
 
   ## Options
 
-    * `:fingerprint` — pin to this certificate. The normal path.
+    * `:fingerprint` — pin to this certificate, in any form
+      `normalize_fingerprint/1` accepts. The normal path.
     * `:verify` — pass `:none` to disable verification entirely. This is what
       every other Hue client does; it is never the default here.
 
   With neither, verification is off: that is first contact, before a fingerprint
   exists to pin to. Anything else raises. In a library whose job is to verify,
   a typo in an option name must not quietly mean "verify nothing", so unknown
-  keys and the contradictory `verify: :none` alongside a `:fingerprint` are
-  rejected rather than resolved.
+  keys, a key given twice — only the first of which would be read — and the
+  contradictory `verify: :none` alongside a `:fingerprint` are all rejected
+  rather than resolved.
 
   ## Why the pinned options look the way they do
 
@@ -182,19 +223,21 @@ defmodule Hue.Transport do
   @spec ssl_options(keyword()) :: keyword()
   def ssl_options(options \\ []) do
     validate_options!(options)
-    fingerprint = options[:fingerprint]
 
-    if is_nil(fingerprint) do
-      [verify: :verify_none]
-    else
-      [
-        verify: :verify_peer,
-        cacerts: [],
-        depth: 0,
-        verify_fun: {&__MODULE__.verify_pinned/4, fingerprint},
-        customize_hostname_check: [match_fun: fn _reference, _presented -> true end]
-      ]
+    case options[:fingerprint] do
+      nil -> [verify: :verify_none]
+      fingerprint -> pinned_options(normalize_fingerprint(fingerprint))
     end
+  end
+
+  defp pinned_options(fingerprint) do
+    [
+      verify: :verify_peer,
+      cacerts: [],
+      depth: 0,
+      verify_fun: {&__MODULE__.verify_pinned/4, fingerprint},
+      customize_hostname_check: [match_fun: fn _reference, _presented -> true end]
+    ]
   end
 
   defp validate_options!(options) do
@@ -202,13 +245,24 @@ defmodule Hue.Transport do
       raise ArgumentError, "expected a keyword list of options, got #{inspect(options)}"
     end
 
-    case Keyword.keys(options) -- @known_options do
-      [] -> :ok
-      unknown -> raise ArgumentError, "unknown option(s) #{inspect(unknown)} for Hue.Transport"
-    end
-
+    keys = Keyword.keys(options)
+    validate_known!(Enum.uniq(keys) -- @known_options)
+    validate_unique!(keys -- Enum.uniq(keys))
     validate_verify!(Keyword.fetch(options, :verify), options[:fingerprint])
-    validate_fingerprint!(options[:fingerprint])
+  end
+
+  defp validate_known!([]), do: :ok
+
+  defp validate_known!(unknown) do
+    raise ArgumentError, "unknown option(s) #{inspect(unknown)} for Hue.Transport"
+  end
+
+  defp validate_unique!([]), do: :ok
+
+  defp validate_unique!(duplicated) do
+    raise ArgumentError,
+          "option(s) #{inspect(Enum.uniq(duplicated))} given more than once — only the " <>
+            "first of each would be read, so the rest would be silently ignored"
   end
 
   defp validate_verify!(:error, _fingerprint), do: :ok
@@ -221,20 +275,6 @@ defmodule Hue.Transport do
 
   defp validate_verify!({:ok, other}, _fingerprint) do
     raise ArgumentError, "verify: #{inspect(other)} is not supported — the only value is :none"
-  end
-
-  defp validate_fingerprint!(nil), do: :ok
-
-  defp validate_fingerprint!(fingerprint) when is_binary(fingerprint) do
-    if String.match?(fingerprint, ~r/\A[0-9a-fA-F]+\z/) do
-      :ok
-    else
-      raise ArgumentError, "fingerprint must be a hex string, got #{inspect(fingerprint)}"
-    end
-  end
-
-  defp validate_fingerprint!(other) do
-    raise ArgumentError, "fingerprint must be a hex string, got #{inspect(other)}"
   end
 
   defp match_pin(der, pinned) do

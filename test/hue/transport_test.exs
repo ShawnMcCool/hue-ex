@@ -3,6 +3,9 @@ defmodule Hue.TransportTest do
 
   alias Hue.Transport
 
+  # A real SHA-256 digest, because a fingerprint is now required to be one.
+  @pin "21cdf48f5217f21923a498576d01c31d800424dafef70efc259f1e05134f3274"
+
   test "fingerprint/1 is a stable lowercase sha256 hex digest" do
     {der, expected} = Hue.Certificates.bridge_certificate()
 
@@ -61,10 +64,10 @@ defmodule Hue.TransportTest do
   end
 
   test "ssl_options/1 pins when given a fingerprint" do
-    options = Transport.ssl_options(fingerprint: "abc123")
+    options = Transport.ssl_options(fingerprint: @pin)
 
     assert options[:verify] == :verify_peer
-    assert {fun, "abc123"} = options[:verify_fun]
+    assert {fun, @pin} = options[:verify_fun]
     assert is_function(fun, 4)
   end
 
@@ -77,20 +80,20 @@ defmodule Hue.TransportTest do
   end
 
   test "ssl_options/1 supplies no CA store, because trust comes from the pin" do
-    assert Transport.ssl_options(fingerprint: "abc123")[:cacerts] == []
+    assert Transport.ssl_options(fingerprint: @pin)[:cacerts] == []
   end
 
   # "I made a typo" must not be spelled the same as "verify nothing".
   describe "ssl_options/1 refuses to degrade silently" do
     test "a misspelled option raises rather than disabling verification" do
       assert_raise ArgumentError, ~r/unknown option/, fn ->
-        Transport.ssl_options(finegrprint: "abc123")
+        Transport.ssl_options(finegrprint: @pin)
       end
     end
 
     test "verify: :none alongside a fingerprint raises rather than discarding the pin" do
       assert_raise ArgumentError, ~r/contradicts/, fn ->
-        Transport.ssl_options(verify: :none, fingerprint: "abc123")
+        Transport.ssl_options(verify: :none, fingerprint: @pin)
       end
     end
 
@@ -114,7 +117,82 @@ defmodule Hue.TransportTest do
 
     test "a non-list argument raises ArgumentError rather than FunctionClauseError" do
       assert_raise ArgumentError, ~r/keyword list/, fn ->
-        Transport.ssl_options(%{fingerprint: "abc123"})
+        Transport.ssl_options(%{fingerprint: @pin})
+      end
+    end
+
+    # A keyword list reads its first match, so the second of these is dropped.
+    # Which one is dropped is exactly the question a pin must not be vague about.
+    test "an option given twice raises rather than using the first quietly" do
+      assert_raise ArgumentError, ~r/more than once/, fn ->
+        Transport.ssl_options(fingerprint: @pin, fingerprint: String.reverse(@pin))
+      end
+    end
+
+    test "an option given twice is not reported as an unknown option" do
+      message =
+        assert_raise ArgumentError, fn ->
+          Transport.ssl_options(fingerprint: @pin, fingerprint: @pin)
+        end
+
+      refute Exception.message(message) =~ "unknown option"
+    end
+  end
+
+  # openssl prints `21:CD:F4:…`. Comparing that to fingerprint/1's output byte
+  # for byte fails, and this library reports that failure as
+  # :certificate_changed — "you are being intercepted". A transcription format
+  # must not be spelled the same as an attack.
+  describe "normalize_fingerprint/1 accepts every form a pin is plausibly pasted in" do
+    test "lowercase hex, which is what fingerprint/1 emits" do
+      assert Transport.normalize_fingerprint(@pin) == @pin
+    end
+
+    test "uppercase hex" do
+      assert Transport.normalize_fingerprint(String.upcase(@pin)) == @pin
+    end
+
+    test "the colon-separated uppercase form openssl prints" do
+      openssl = @pin |> String.upcase() |> colon_separated()
+
+      assert Transport.normalize_fingerprint(openssl) == @pin
+    end
+
+    test "the colon-separated lowercase form" do
+      assert Transport.normalize_fingerprint(colon_separated(@pin)) == @pin
+    end
+
+    test "any of those with surrounding whitespace" do
+      assert Transport.normalize_fingerprint("  #{String.upcase(@pin)}\n") == @pin
+    end
+
+    test "and the pinned options carry the normalised form, whichever was given" do
+      openssl = @pin |> String.upcase() |> colon_separated()
+
+      assert {_fun, @pin} = Transport.ssl_options(fingerprint: openssl)[:verify_fun]
+    end
+  end
+
+  describe "normalize_fingerprint/1 requires a whole digest" do
+    test "a short hex string raises, rather than pinning to a prefix" do
+      assert_raise ArgumentError, ~r/64-character hex string/, fn ->
+        Transport.normalize_fingerprint("abc")
+      end
+
+      assert_raise ArgumentError, ~r/64-character hex string/, fn ->
+        Transport.normalize_fingerprint(String.slice(@pin, 0..62))
+      end
+    end
+
+    test "a long hex string raises" do
+      assert_raise ArgumentError, ~r/64-character hex string/, fn ->
+        Transport.normalize_fingerprint(@pin <> "a")
+      end
+    end
+
+    test "a non-string raises ArgumentError rather than FunctionClauseError" do
+      assert_raise ArgumentError, ~r/hex string/, fn ->
+        Transport.normalize_fingerprint(:abcd)
       end
     end
   end
@@ -344,6 +422,11 @@ defmodule Hue.TransportTest do
     end
 
     collect_observed([])
+  end
+
+  # `21cdf4…` -> `21:cd:f4:…`, the layout openssl prints a digest in.
+  defp colon_separated(fingerprint) do
+    fingerprint |> String.graphemes() |> Enum.chunk_every(2) |> Enum.map_join(":", &Enum.join/1)
   end
 
   defp collect_observed(acc) do
