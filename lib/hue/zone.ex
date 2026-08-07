@@ -8,6 +8,9 @@ defmodule Hue.Zone do
   room but to any number of zones. Everything else is `Hue.Room`: the write goes
   to the zone's `grouped_light` service, and a zone owning none returns
   `{:error, %Hue.Error{reason: :no_grouped_light}}`.
+
+  Options are `Hue.Light`'s, plus `:await` and `:await_timeout` — see
+  `Hue.Bridge.await_write/5`.
   """
 
   alias Hue.Error

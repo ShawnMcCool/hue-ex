@@ -26,6 +26,10 @@ defmodule Hue.Light do
       this light's own gamut
     * `:kelvin` — a colour temperature, clamped to this light's own mirek schema
     * `:transition` — milliseconds for the light to take getting there
+    * `:await` — wait for the event confirming the change instead of returning
+      as soon as it is queued. See `Hue.Bridge.await_write/5` for what it
+      consumes from your mailbox.
+    * `:await_timeout` — milliseconds to wait when `await: true`. Defaults to 5 seconds.
 
   ## Errors, and which ones raise
 
@@ -54,9 +58,11 @@ defmodule Hue.Light do
   """
   @spec set(atom(), String.t(), keyword()) :: :ok | {:error, Error.t()}
   def set(bridge, target, options) when is_binary(target) and is_list(options) do
+    {await?, timeout, options} = Bridge.pop_await(options)
+
     with {:ok, light} <- get(bridge, target),
          {:ok, body} <- Body.build(options, light) do
-      Bridge.write(bridge, :light, light["id"], body)
+      Bridge.put(bridge, :light, light["id"], body, await?, timeout)
     end
   end
 end

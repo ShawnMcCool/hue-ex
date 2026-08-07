@@ -19,9 +19,11 @@ defmodule Hue.Group do
 
   @spec set(atom(), :room | :zone, String.t(), keyword()) :: :ok | {:error, Error.t()}
   def set(bridge, type, target, options) do
+    {await?, timeout, options} = Bridge.pop_await(options)
+
     with {:ok, grouped} <- Bridge.grouped_light(bridge, type, target),
          {:ok, body} <- Body.build(options, grouped) do
-      Bridge.write(bridge, :grouped_light, grouped["id"], body)
+      Bridge.put(bridge, :grouped_light, grouped["id"], body, await?, timeout)
     end
   end
 end

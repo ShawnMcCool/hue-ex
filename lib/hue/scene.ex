@@ -25,14 +25,17 @@ defmodule Hue.Scene do
   @doc """
   Activates a scene.
 
-  `:duration` is milliseconds for the transition into the scene.
+  `:duration` is milliseconds for the transition into the scene. `:await` and
+  `:await_timeout` wait for the confirming event — see
+  `Hue.Bridge.await_write/5`.
   """
   @spec recall(atom(), String.t(), keyword()) :: :ok | {:error, Error.t()}
   def recall(bridge, target, options \\ []) do
+    {await?, timeout, options} = Bridge.pop_await(options)
     recall = Enum.reduce(options, %{"action" => "active"}, &recall_option/2)
 
     with {:ok, scene} <- get(bridge, target) do
-      Bridge.write(bridge, :scene, scene["id"], %{"recall" => recall})
+      Bridge.put(bridge, :scene, scene["id"], %{"recall" => recall}, await?, timeout)
     end
   end
 

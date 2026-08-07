@@ -16,7 +16,7 @@ defmodule Hue.Room do
   Two of the six rooms on the reference bridge are in exactly that state.
 
   Options are `Hue.Light`'s, checked against the group rather than a single
-  bulb.
+  bulb, plus `:await` and `:await_timeout` — see `Hue.Bridge.await_write/5`.
   """
 
   alias Hue.Error

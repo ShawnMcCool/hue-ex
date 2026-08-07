@@ -62,6 +62,7 @@ defmodule Hue.Bridge do
   alias Hue.Bridge.Cache
   alias Hue.Bridge.Graph
   alias Hue.Error
+  alias Hue.Event
 
   defmodule Info do
     @moduledoc """
@@ -86,6 +87,7 @@ defmodule Hue.Bridge do
   end
 
   @default_name __MODULE__
+  @default_await_timeout :timer.seconds(5)
 
   # A flapping bridge (503s, timeouts) never reaches this budget: sync/1
   # handles those without crashing, via its own Process.send_after retry.
@@ -218,6 +220,62 @@ defmodule Hue.Bridge do
       pid -> GenServer.cast(pid, {:write, type, rid, body})
     end
   end
+
+  @doc """
+  Queues a write and waits for the event that confirms it.
+
+  Waits for the **event**, not the PUT's response, because the event is the
+  thing that is true. Returns `:ok` once an event for that rid arrives,
+  `{:error, %Hue.Error{}}` if the write failed, or
+  `{:error, %Hue.Error{reason: :timeout}}` if nothing arrived in time.
+
+  ## Two limitations worth knowing
+
+  The wait happens in **your** mailbox. If this process was independently
+  subscribed to the same rid, this call consumes the confirming event and your
+  `handle_info` never sees it. And it unsubscribes afterwards, which clears a
+  pre-existing `rid:` subscription for that same rid.
+
+  Neither is a problem for the normal case — a script, a test, or a step in a
+  sequence. If a process both subscribes by rid and needs confirmation, use the
+  subscription it already has and match the event yourself.
+  """
+  @spec await_write(atom(), atom(), String.t(), map(), keyword()) :: :ok | {:error, Error.t()}
+  def await_write(name, type, rid, body, options \\ []) do
+    timeout = Keyword.get(options, :timeout, @default_await_timeout)
+
+    with :ok <- subscribe(name, rid: rid) do
+      try do
+        with :ok <- write(name, type, rid, body), do: wait_for(rid, timeout)
+      after
+        unsubscribe(name, rid: rid)
+      end
+    end
+  end
+
+  # Selective receive on the rid: an event for a different resource is left in
+  # the mailbox rather than consumed and discarded.
+  defp wait_for(rid, timeout) do
+    receive do
+      {:hue, %Event{rid: ^rid, type: :error, data: %Error{} = error}} -> {:error, error}
+      {:hue, %Event{rid: ^rid}} -> :ok
+    after
+      timeout -> {:error, %Error{reason: :timeout, rid: rid}}
+    end
+  end
+
+  @doc false
+  def pop_await(options) do
+    {await?, options} = Keyword.pop(options, :await, false)
+    {timeout, options} = Keyword.pop(options, :await_timeout, @default_await_timeout)
+    {await?, timeout, options}
+  end
+
+  @doc false
+  def put(name, type, rid, body, false, _timeout), do: write(name, type, rid, body)
+
+  def put(name, type, rid, body, true, timeout),
+    do: await_write(name, type, rid, body, timeout: timeout)
 
   @doc "The name a rid is known by, or `nil`."
   @spec name_of(atom(), atom(), String.t()) :: String.t() | nil
