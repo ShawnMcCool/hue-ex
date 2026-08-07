@@ -142,4 +142,18 @@ defmodule Hue.GroupTest do
   test "a negative scene duration raises", %{name: name} do
     assert_raise ArgumentError, ~r/duration/, fn -> Scene.recall(name, "Relax", duration: -1) end
   end
+
+  # The test above uses "Relax", a scene that exists, so it cannot tell
+  # "validated before resolving" apart from "validated after resolving found
+  # nothing wrong with the target and then hit the bad option." Both orders
+  # raise when the target is real. Only a target that does *not* exist,
+  # combined with a malformed option, can distinguish them: resolve-first
+  # would return {:error, :not_found} for "Nowhere" and never reach the
+  # option that should raise; validate-first raises regardless of whether
+  # "Nowhere" is a scene at all.
+  test "a malformed option raises even for a scene that does not exist", %{name: name} do
+    assert_raise ArgumentError, ~r/duration/, fn ->
+      Scene.recall(name, "Nowhere", duration: -1)
+    end
+  end
 end

@@ -9,7 +9,7 @@ defmodule Hue.Room do
   A room has no `on` state of its own. What responds is the `grouped_light`
   service the room owns, and `set/3` walks there for you. `get/2` deliberately
   returns the *room* — that is what you asked for — so if you want the group's
-  current brightness, read the `grouped_light` it points at.
+  current brightness, read it with `Hue.Bridge.grouped_light/3` instead.
 
   An empty room owns no `grouped_light` at all, and `set/3` returns
   `{:error, %Hue.Error{reason: :no_grouped_light}}` rather than inventing one.
