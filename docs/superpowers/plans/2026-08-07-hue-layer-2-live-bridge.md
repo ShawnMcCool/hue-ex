@@ -1986,7 +1986,7 @@ defmodule Hue.Bridge.Server do
   @impl GenServer
   def init(options) do
     state = %__MODULE__{
-      client: Keyword.fetch!(options, :client),
+      client: without_retry(Keyword.fetch!(options, :client)),
       name: Keyword.fetch!(options, :name),
       table: Keyword.fetch!(options, :table),
       retry_after: Keyword.get(options, :retry_after, @default_retry_after)
@@ -1995,6 +1995,22 @@ defmodule Hue.Bridge.Server do
     Cache.new(state.table)
 
     {:ok, state, {:continue, :sync}}
+  end
+
+  # Req retries a GET answered 503 up to three times with exponential backoff by
+  # default, under `:safe_transient`. Left on, that sits *underneath* this
+  # server's own `retry_after` and reconnect backoff: one scheduled attempt
+  # becomes up to four round trips over several seconds, and two uncoordinated
+  # backoff layers compound. Layer 1 deliberately invents no retry policy and
+  # leaves it to the caller (see `Hue.Client`) — this server is that caller, and
+  # it owns reconnect timing, so it should be the only source of it.
+  #
+  # This also makes tests and production agree: `Hue.Stub` disables retry so
+  # scripted failure counts are not silently consumed, and without this the
+  # suite would model a bridge that fails once where the real one fails four
+  # times per logical attempt.
+  defp without_retry(%Client{} = client) do
+    %{client | req: Req.merge(client.req, retry: false)}
   end
 
   @impl GenServer
@@ -2536,7 +2552,7 @@ defmodule Hue.Bridge.Server do
   @impl GenServer
   def init(options) do
     state = %__MODULE__{
-      client: Keyword.fetch!(options, :client),
+      client: without_retry(Keyword.fetch!(options, :client)),
       name: Keyword.fetch!(options, :name),
       table: Keyword.fetch!(options, :table),
       retry_after: Keyword.get(options, :retry_after, @default_retry_after),
