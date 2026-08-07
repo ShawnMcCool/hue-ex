@@ -34,6 +34,14 @@ defmodule Hue.Stub do
     * `:fetch_status` — an HTTP status to fail the full-state fetch with.
     * `:fetch_failures` — how many fetches fail with `:fetch_status` before the
       stub starts succeeding. Omit for "every fetch fails".
+    * `:fetch_hang` — when `true`, the full-state fetch never answers. For
+      proving a property about what happens *before* a response arrives (a
+      caller that must not block on it) rather than about the response
+      itself — `:fetch_status` answers immediately even for a stubbed
+      failure, which cannot distinguish "returned without waiting" from
+      "waited, but the wait was short." The request blocks in the calling
+      process until that process is torn down; nothing in this stub ever
+      releases it.
     * `:eventstream_status` — an HTTP status to refuse the eventstream with.
   """
 
@@ -47,6 +55,7 @@ defmodule Hue.Stub do
     test = self()
     resources = Keyword.get_lazy(options, :resources, fn -> Hue.Fixtures.full_state()["data"] end)
     fetch_status = Keyword.get(options, :fetch_status)
+    fetch_hang = Keyword.get(options, :fetch_hang, false)
     eventstream_status = Keyword.get(options, :eventstream_status)
 
     # A counter rather than an Agent: it is shared across every process that
@@ -69,6 +78,7 @@ defmodule Hue.Stub do
             test: test,
             resources: resources,
             fetch_status: fetch_status,
+            fetch_hang: fetch_hang,
             eventstream_status: eventstream_status,
             remaining_failures: remaining_failures
           })
@@ -87,6 +97,14 @@ defmodule Hue.Stub do
 
   defp route(%{method: "GET", request_path: "/clip/v2/resource"} = conn, config) do
     send(config.test, {:hue_stub, :fetch, conn.request_path})
+
+    if config.fetch_hang do
+      # No timeout and nothing in this module ever sends the release: the
+      # calling process blocks here until it is torn down. See `:fetch_hang`
+      # in the moduledoc for why a status-based failure cannot substitute.
+      receive do
+      end
+    end
 
     if failing?(config.remaining_failures, config.fetch_status) do
       refuse(conn, config.fetch_status)
