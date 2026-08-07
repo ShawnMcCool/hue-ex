@@ -344,14 +344,31 @@ defmodule Hue.Bridge.Merge do
       %{"dimming" => %{"brightness" => 86.11, "min_dim_level" => 0.2}}
   """
   @spec merge(map(), map()) :: map()
-  def merge(cached, delta) when is_map(cached) and is_map(delta) do
+  def merge(cached, delta)
+      when is_map(cached) and is_map(delta) and not is_struct(cached) and not is_struct(delta) do
     Map.merge(cached, delta, fn _key, old, new -> merge_values(old, new) end)
   end
 
-  defp merge_values(old, new) when is_map(old) and is_map(new), do: merge(old, new)
+  defp merge_values(old, new)
+       when is_map(old) and is_map(new) and not is_struct(old) and not is_struct(new) do
+    merge(old, new)
+  end
+
   defp merge_values(_old, new), do: new
 end
 ```
+
+> **Corrected after implementation.** The guards originally read `is_map/1` alone.
+> Structs are maps, so that silently accepted them: two different struct types at
+> one key deep-merge into a value tagged with one struct's `__struct__` while
+> carrying the other's fields. Not reachable from Task 4's `apply_event/2`, which
+> short-circuits `:error` events, but `Merge` promised nothing about it and Task 12
+> puts `%Hue.Error{}` into event data. A struct is an opaque value and replaces.
+>
+> The test originally specified to catch this — merging two **same-type**
+> `%Hue.Error{}` structs — is **vacuous**: their fields are scalars, so field-by-field
+> replacement and whole-value replacement produce the same result whether the guard
+> fires or not. Use two *different* struct types.
 
 - [ ] **Step 4: Run the test to verify it passes**
 
@@ -535,7 +552,10 @@ defmodule Hue.Bridge.Names do
 
   alias Hue.Resource
 
-  @self_named ~w(room zone scene smart_scene device)
+  # `device` is deliberately absent: it has its own clause below, because it
+  # contributes its own entry *and* names every service it owns. These four
+  # contribute nothing but their own entry.
+  @named_without_services ~w(room zone scene smart_scene)
 
   @doc """
   Returns every index entry implied by `resources`, as `{key, value}` pairs
@@ -556,7 +576,7 @@ defmodule Hue.Bridge.Names do
   end
 
   defp entries_for(%{"type" => type, "id" => rid, "metadata" => %{"name" => name}})
-       when is_binary(rid) and is_binary(name) and type in @self_named do
+       when is_binary(rid) and is_binary(name) and type in @named_without_services do
     pair(Resource.type(type), rid, name)
   end
 
@@ -587,12 +607,20 @@ Expected: PASS, 11 tests.
 
 - [ ] **Step 5: Verify the fixture assertions are not vacuous**
 
-The two fixture tests are the ones most likely to pass for the wrong reason. Temporarily change `@self_named` to `~w(room zone scene smart_scene)` — dropping `device` — and re-run.
+The two fixture tests are the ones most likely to pass for the wrong reason.
 
-Run: `cd ~/src/hue-ex && mix test test/hue/bridge/names_test.exs`
-Expected: FAIL on "a device is also indexed under its own type" but **PASS** on "the real fixture names all nineteen lights", because light names come from `service_entries/2`, not from the device's own entry. That is correct and worth seeing: the two paths are independent.
+> **Corrected after implementation.** This step originally said to drop `device`
+> from the guard list and expect "a device is also indexed under its own type" to
+> fail. **That prediction was impossible**, and the step above it says why: the
+> device clause matches `%{"type" => "device", …}` under the same guards the
+> guard-list clause needs, so a device never reaches the guard list and the member
+> was unreachable. The prediction was self-contradicted by the plan's own
+> implementation. Removing `device` is a no-op on behaviour and is now done above.
+>
+> The lesson generalises: when a break-it step's predicted failure does not happen,
+> that is a finding about the code or the plan, never a nuisance to route around.
 
-Now temporarily make `service_entries/2` return `[]` unconditionally and re-run.
+Temporarily make `service_entries/2` return `[]` unconditionally and re-run.
 Expected: FAIL on "the real fixture names all nineteen lights" with `0` instead of `19`. Restore both and confirm PASS.
 
 - [ ] **Step 6: Commit**
@@ -923,18 +951,46 @@ defmodule Hue.Bridge.Cache do
   Replaces the cache's entire contents with `resources` and rebuilds both name
   indexes.
 
-  Replacement rather than merge is what makes reconnect correct: a resource
-  deleted while the stream was down disappears here, and there is no path by
-  which a stale resource outlives a refetch.
+  Pruning is what makes reconnect correct: a resource deleted while the stream
+  was down disappears here, and there is no path by which a stale resource
+  outlives a refetch.
+
+  ## Never remove before inserting
+
+  **Corrected after implementation.** This originally cleared the table with
+  `:ets.delete_all_objects/1` and reinserted, restoring the status row afterwards.
+  That is wrong, and wrong in exactly the way this module's own documentation says
+  it must not be: reads happen in *other* processes, concurrently, so during a
+  **reseed** — a reconnect refetch, not the first sync — a reader could observe the
+  lifecycle rows briefly absent. `status/1` would answer `:not_started` and every
+  read `:not_synced`, for a bridge that synced an hour ago and is merely
+  refreshing. "Five-second-stale beats refusing to answer" became "refuse to
+  answer" for the duration of the window.
+
+  So the rule across this module is: **insert the new state, then prune whatever
+  the new state does not contain.** `@status_key` is then never written by `seed/2`
+  at all — there is nothing to restore if it was never removed — and `@seeded_key`
+  is written last, so the *first* seed still gates reads until the table is
+  populated while a reseed never unsets it.
+
+  `reindex/1` had the same defect and takes the same shape, for the same reason: a
+  name lookup landing between the `match_delete` and the rebuild would miss on a
+  name that exists.
+
+  The honest limit: a single-threaded test cannot distinguish insert-then-prune
+  from delete-then-insert here, because both reach the same end state. Reverting
+  `reindex/1` leaves the suite green. The property is established structurally —
+  the pruning match specs cannot reach a bare-atom key, so the lifecycle rows are
+  not merely restored promptly, they are never removed — not by a test.
   """
   @spec seed(table(), [map()]) :: :ok
   def seed(table, resources) when is_list(resources) do
-    status = status(table)
+    # Insert before pruning. See "Never remove before inserting" below.
+    rows = Enum.map(resources, &{{type_of(&1), rid_of(&1)}, &1})
 
-    :ets.delete_all_objects(table)
-    :ets.insert(table, Enum.map(resources, &{{type_of(&1), rid_of(&1)}, &1}))
-    :ets.insert(table, Names.entries(resources))
-    :ets.insert(table, {@status_key, status})
+    :ets.insert(table, rows)
+    prune_resources(table, MapSet.new(rows, fn {key, _resource} -> key end))
+    reindex(table)
     :ets.insert(table, {@seeded_key, true})
 
     :ok
@@ -1099,8 +1155,12 @@ Expected: FAIL on "a synced cache keeps serving reads while the stream is down" 
 
 - [ ] **Step 6: Verify the select match spec does not pick up index rows**
 
-Run: `cd ~/src/hue-ex && mix test test/hue/bridge/cache_test.exs --only test:"list/2 returns every resource of one type and nothing else"`
-Expected: PASS. Then temporarily change the `list/2` match spec to `[{{{type, :_}, :"$2"}, [], [:"$2"]}]` — still correct — and re-run to confirm it stays green; the point is that neither form can reach a three-tuple key. If a future edit widens it to `{:"$1", :"$2"}`, the seeded device rows and the name rows would both leak into `list(table, :light)`.
+Run the single test by line number — `--only` filters by **tag**, not by test name, so `--only test:"…"` matches nothing and silently runs zero tests:
+
+Run: `cd ~/src/hue-ex && mix test test/hue/bridge/cache_test.exs:<line of that test>`
+Expected: PASS. Then temporarily change the `list/2` match spec to `[{{{type, :_}, :"$2"}, [], [:"$2"]}]` — still correct — and re-run to confirm it stays green; the point is that neither form can reach a three-tuple key.
+
+Re-running the suite is the weak version of this check, because it only proves the current fixtures do not trip it. Do the strong version: build a throwaway table holding all five key shapes at once — `{{:light, rid}, resource}`, `{{:name, :light, name}, rid}`, `{{:rid_name, :light, rid}, name}`, `{:__seeded__, true}`, `{:__status__, :live}` — and run the real match specs against it directly. A widening to `{:"$1", :"$2"}` leaks **everything**, the lifecycle rows included, not just the device and name rows.
 
 - [ ] **Step 7: Commit**
 
