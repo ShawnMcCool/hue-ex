@@ -524,7 +524,7 @@ discarding either.
 ### Telemetry
 
 ```
-[:hue, :request, :start | :stop | :exception]     duration, type, rid, status
+[:hue, :request, :start | :stop | :exception]     duration, method, path, result
 [:hue, :pairing, :start | :stop | :exception]     duration, method, path, result
 [:hue, :stream, :connected | :disconnected]       reason, downtime
 [:hue, :sync, :stop]                              resource_count, duration
@@ -551,6 +551,33 @@ discarding either.
 > are deliberately never included in either event's metadata: an application
 > key is exactly as sensitive as a password, and telemetry handlers are
 > commonly attached loggers.
+>
+> **Corrected a third time, before 0.2.0 shipped.** `[:hue, :request]`'s own
+> row was wrong the whole time: `type, rid, status` was never what
+> `Hue.Resource`'s `request/7` emits. Reading the call site directly —
+> `metadata = %{method: method, path: path}`, passed to `:telemetry.span/3` —
+> and cross-referencing `:telemetry.span/3`'s own implementation for how it
+> shapes each event:
+>
+>   * `:start` — metadata `%{method:, path:}` (plus the span's own
+>     `telemetry_span_context`).
+>   * `:stop` — metadata `%{method:, path:, result:}`, where `result` is
+>     `:ok` or `:error` and reflects what the *caller* receives, not just the
+>     wire-level HTTP outcome (see `Hue.Resource`'s own moduledoc).
+>   * `:exception` — metadata `%{method:, path:, kind:, reason:,
+>     stacktrace:}`. Note this is the *start* metadata merged with exception
+>     info, not the stop metadata — `:result` never appears on an
+>     `:exception` event, because the span function never returned to
+>     produce it.
+>
+> `type` and `rid` never appear anywhere. `rid` is passed into `request/7`
+> and used for interpreting the response (`pick_one/2`'s `:not_found`
+> collapse, `Error.from_response/4`'s `rid:` option), but it is never put into
+> the telemetry metadata itself — a handler that wants to know which light a
+> slow request concerned cannot currently find out from this event. That is a
+> real gap, but adding `rid` to the metadata is a behaviour change to what
+> the span carries, not a documentation fix, so it is left as a possible
+> follow-up rather than done here.
 
 `[:hue, :stream, :disconnected]` is the important one. The characteristic failure
 of this library is silence: a dead stream means every read is quietly stale, and

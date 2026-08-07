@@ -201,7 +201,7 @@ most useful thing to monitor about this library.
 ## Telemetry
 
 ```
-[:hue, :request, :start | :stop | :exception]   duration, type, rid, status
+[:hue, :request, :start | :stop | :exception]   duration, method, path, result
 [:hue, :pairing, :start | :stop | :exception]   duration, method, path, result
 [:hue, :sync, :stop]                            duration, resource_count
 [:hue, :stream, :connected]                     downtime
@@ -209,6 +209,15 @@ most useful thing to monitor about this library.
 [:hue, :write, :coalesced]                      collapsed_count
 [:hue, :write, :failed]                         reason
 ```
+
+> **Corrected before 0.2.0.** This table previously listed `type, rid, status`
+> for `[:hue, :request, *]`. That was never what `Hue.Resource` emits: its
+> span metadata is `%{method:, path:}` at `:start`, with `:result` (`:ok` or
+> `:error`) added at `:stop` — no `type`, `rid`, or `status` key ever appears.
+> `rid` in particular would be useful (a handler wanting to know which light a
+> slow request concerned currently cannot), but adding it is a behaviour
+> change to what the span carries, not a documentation fix — noted as a
+> possible follow-up, not done here.
 
 `[:hue, :request, *]` and `[:hue, :pairing, *]` (layer 1, via
 `:telemetry.span/3`) fire around every `Hue.Resource` call and every
