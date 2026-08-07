@@ -42,6 +42,14 @@ defmodule Hue.Stub do
       "waited, but the wait was short." The request blocks in the calling
       process until that process is torn down; nothing in this stub ever
       releases it.
+    * `:put_status` — an HTTP status to fail a write (`PUT`) with. Mirrors
+      `:fetch_status`.
+    * `:put_failures` — how many writes fail with `:put_status` before the
+      stub starts succeeding. Omit for "every write fails". Mirrors
+      `:fetch_failures`.
+    * `:put_hang` — when `true`, a write never answers. Mirrors `:fetch_hang`
+      — it is what proves a PUT genuinely runs off the caller's stack rather
+      than merely answering fast enough that the difference doesn't show.
     * `:eventstream_status` — an HTTP status to refuse the eventstream with.
     * `:retry` — `true` to leave Req's own retry (`:safe_transient`) enabled
       on the client, instead of this stub's usual `retry: false`. For proving
@@ -62,13 +70,21 @@ defmodule Hue.Stub do
     resources = Keyword.get_lazy(options, :resources, fn -> Hue.Fixtures.full_state()["data"] end)
     fetch_status = Keyword.get(options, :fetch_status)
     fetch_hang = Keyword.get(options, :fetch_hang, false)
+    put_status = Keyword.get(options, :put_status)
+    put_hang = Keyword.get(options, :put_hang, false)
     eventstream_status = Keyword.get(options, :eventstream_status)
     retry_enabled? = Keyword.get(options, :retry, false)
 
     # A counter rather than an Agent: it is shared across every process that
-    # makes a request, and it needs no supervision or cleanup.
-    remaining_failures = :counters.new(1, [:atomics])
-    :counters.put(remaining_failures, 1, Keyword.get(options, :fetch_failures, -1))
+    # makes a request, and it needs no supervision or cleanup. Fetch and
+    # write failures get their own counters -- a test scripting "the fetch
+    # fails twice" must not also silently consume a "the write fails twice"
+    # budget it never asked for, and vice versa.
+    remaining_fetch_failures = :counters.new(1, [:atomics])
+    :counters.put(remaining_fetch_failures, 1, Keyword.get(options, :fetch_failures, -1))
+
+    remaining_put_failures = :counters.new(1, [:atomics])
+    :counters.put(remaining_put_failures, 1, Keyword.get(options, :put_failures, -1))
 
     # Req retries a 503 by default (:safe_transient), which would run the
     # plug — and so consume the failure counter below — more than once per
@@ -91,8 +107,11 @@ defmodule Hue.Stub do
               resources: resources,
               fetch_status: fetch_status,
               fetch_hang: fetch_hang,
+              put_status: put_status,
+              put_hang: put_hang,
               eventstream_status: eventstream_status,
-              remaining_failures: remaining_failures
+              remaining_fetch_failures: remaining_fetch_failures,
+              remaining_put_failures: remaining_put_failures
             })
           end
         ] ++ retry_option
@@ -119,7 +138,7 @@ defmodule Hue.Stub do
       end
     end
 
-    if failing?(config.remaining_failures, config.fetch_status) do
+    if failing?(config.remaining_fetch_failures, config.fetch_status) do
       refuse(conn, config.fetch_status)
     else
       json(conn, 200, %{"errors" => [], "data" => config.resources})
@@ -130,7 +149,21 @@ defmodule Hue.Stub do
     {:ok, raw, conn} = Plug.Conn.read_body(conn)
     send(config.test, {:hue_stub, :put, conn.request_path, Jason.decode!(raw)})
 
-    json(conn, 200, %{"errors" => [], "data" => []})
+    if config.put_hang do
+      # Mirrors :fetch_hang above: nothing here ever releases this receive,
+      # so the calling process -- a write task, in layer 2 -- blocks until
+      # it is torn down. See Hue.Bridge.Server's send_write/4: proving a PUT
+      # never blocks the server needs a PUT that genuinely never answers,
+      # not one that merely answers fast.
+      receive do
+      end
+    end
+
+    if failing?(config.remaining_put_failures, config.put_status) do
+      refuse(conn, config.put_status)
+    else
+      json(conn, 200, %{"errors" => [], "data" => []})
+    end
   end
 
   defp route(conn, config) do

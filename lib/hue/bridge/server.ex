@@ -64,12 +64,56 @@ defmodule Hue.Bridge.Server do
   and stamped on every scheduled retry; `handle_info/2` drops any retry whose
   stamp does not match the current one, which is the only place this needs to
   exist — `:reconnect` always starts a fresh cycle and needs no such guard.
+
+  ## Writes are queued here, but never run here
+
+  `handle_cast({:write, ...})` only ever touches `Hue.Bridge.Writes` — a pure
+  struct — and arms a timer. The PUT itself is sent by `send_write/4` from a
+  task on `Bridge.tasks/1`, via `Task.Supervisor.async_nolink/2`. Two things
+  follow from `async_nolink` specifically, not from `async/2`:
+
+    * A write that crashed its task does not crash this server. It has no
+      caller left to report to by the time it fails (`write/4` already
+      returned `:ok`), so `handle_info/2` catches the `{:DOWN, ...}` and
+      routes it to `report_write_failure/3` instead of letting the ordinary
+      supervised-task link tear this process down over an HTTP error.
+    * A write's completion arrives as the same `{ref, result}` / `{:DOWN,
+      ...}` shapes the stream task already produces. `write_tasks` is a
+      second map keyed by ref specifically so the two families of message
+      cannot be confused for each other, matched with `is_map_key(tasks,
+      ref)`. What actually keeps a write's completion from being mistaken
+      for the stream's is not clause order — a `Task.Supervisor.async_nolink/2`
+      reference is unique per call, so a write's ref can never equal
+      `state.stream_task.ref` and never becomes a key in `write_tasks` by
+      accident either. Clause order only decides that a write's completion
+      is matched by *some* `handle_info/2` clause at all, rather than
+      falling through to the catch-all `handle_info(_message, state)` and
+      being silently ignored — which is why these clauses sit before it.
+
+  ## `Writes.due_in/3` can answer `:never`
+
+  Nothing is pending for a type once its last write has been taken — and
+  `Process.send_after/3` raises `ArgumentError` given `:never` where it wants
+  a non-negative integer. `arm_flush/2` branches on it explicitly rather than
+  forwarding whatever `due_in/3` returned, because dialyzer does not catch
+  this: success typing only rejects calls that can *never* succeed, and
+  `due_in/3`'s return type is a union that also contains
+  `non_neg_integer()`, so a probe that skips the branch and passes the value
+  straight through compiles clean.
+
+  ## A failed write has no caller left
+
+  `write/4` already returned `:ok` by the time a write task's result is
+  known, so a failure cannot be returned to anyone — it is reported instead,
+  through `[:hue, :write, :failed]` telemetry and through an `error` event to
+  whoever subscribed. See `report_write_failure/3`.
   """
 
   use GenServer
 
   alias Hue.Bridge
   alias Hue.Bridge.Cache
+  alias Hue.Bridge.Writes
   alias Hue.Client
   alias Hue.Error
   alias Hue.Event
@@ -89,10 +133,13 @@ defmodule Hue.Bridge.Server do
     :stream_task,
     :disconnected_at,
     :live_since,
+    :writes,
     backoff: nil,
     buffer: [],
     syncing?: true,
-    generation: 0
+    generation: 0,
+    flush_armed: MapSet.new(),
+    write_tasks: %{}
   ]
 
   @doc false
@@ -110,7 +157,8 @@ defmodule Hue.Bridge.Server do
       retry_after: Keyword.get(options, :retry_after, @default_retry_after),
       reconnect_after: Keyword.get(options, :reconnect_after, @default_reconnect_after),
       max_reconnect_after:
-        Keyword.get(options, :max_reconnect_after, @default_max_reconnect_after)
+        Keyword.get(options, :max_reconnect_after, @default_max_reconnect_after),
+      writes: Writes.new()
     }
 
     Cache.new(state.table)
@@ -139,6 +187,25 @@ defmodule Hue.Bridge.Server do
     {:noreply, state |> open_stream() |> sync()}
   end
 
+  # Only the queue is touched here -- coalescing (Hue.Bridge.Writes.enqueue/3)
+  # and arming a flush timer are both cheap and synchronous. The PUT itself
+  # never runs in this reduction; see send_write/4 and the moduledoc's
+  # "Writes are queued here, but never run here".
+  @impl GenServer
+  def handle_cast({:write, type, rid, body}, state) do
+    {writes, collapsed} = Writes.enqueue(state.writes, {type, rid}, body)
+
+    if collapsed > 0 do
+      :telemetry.execute(
+        [:hue, :write, :coalesced],
+        %{collapsed_count: collapsed},
+        %{bridge: state.name, type: type, rid: rid}
+      )
+    end
+
+    {:noreply, arm_flush(%{state | writes: writes}, type)}
+  end
+
   @impl GenServer
   def handle_info({:sync, generation}, %{generation: generation} = state) do
     {:noreply, sync(state)}
@@ -155,6 +222,24 @@ defmodule Hue.Bridge.Server do
   def handle_info({:sync, _stale_generation}, state), do: {:noreply, state}
 
   def handle_info(:reconnect, state), do: {:noreply, state |> open_stream() |> sync()}
+
+  # `flush_armed` is cleared before `take/3` is even asked, not after: the
+  # timer that fired is the one this clears, so whatever `arm_flush/2` decides
+  # below (nothing left, due -> send now, or not yet due -> arm a fresh timer)
+  # starts from "no timer is currently armed for this type" rather than
+  # having to reason about the one that just fired.
+  def handle_info({:flush, type}, state) do
+    state = %{state | flush_armed: MapSet.delete(state.flush_armed, type)}
+
+    case Writes.take(state.writes, type, now()) do
+      :empty ->
+        {:noreply, state}
+
+      {:ok, {^type, rid}, body, writes} ->
+        state = %{state | writes: writes}
+        {:noreply, state |> send_write(type, rid, body) |> arm_flush(type)}
+    end
+  end
 
   def handle_info({:hue_event, event}, %{syncing?: true} = state) do
     {:noreply, %{state | buffer: [event | state.buffer]}}
@@ -200,6 +285,36 @@ defmodule Hue.Bridge.Server do
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{stream_task: %Task{ref: ref}} = state) do
     {:noreply, disconnected(state, exit_reason(reason))}
+  end
+
+  # A write task's normal completion. `Resource.update/5` never raises for an
+  # HTTP-level failure -- it returns `{:error, %Error{}}` -- so `:ok` and
+  # `{:error, _}` are the only shapes actually reached here; `_other` exists
+  # only so a change to `Resource.update/5`'s contract fails a test rather
+  # than crashing this server.
+  def handle_info({ref, result}, %{write_tasks: tasks} = state) when is_map_key(tasks, ref) do
+    Process.demonitor(ref, [:flush])
+    {target, tasks} = Map.pop(tasks, ref)
+
+    case result do
+      :ok -> :ok
+      {:error, error} -> report_write_failure(state, target, error)
+      _other -> :ok
+    end
+
+    {:noreply, %{state | write_tasks: tasks}}
+  end
+
+  # A write task that crashed instead of returning -- a bug in this library,
+  # in Req, or in the connection, rather than an HTTP error the bridge
+  # answered with (that path is the clause above). `async_nolink/2` is what
+  # keeps this from taking the server down with it: the crash arrives here as
+  # data, not as this process's own exit.
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{write_tasks: tasks} = state)
+      when is_map_key(tasks, ref) do
+    {target, tasks} = Map.pop(tasks, ref)
+    report_write_failure(state, target, %Error{reason: exit_reason(reason)})
+    {:noreply, %{state | write_tasks: tasks}}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
@@ -352,6 +467,57 @@ defmodule Hue.Bridge.Server do
   defp exit_reason({reason, _stacktrace}) when is_atom(reason), do: reason
   defp exit_reason(reason) when is_atom(reason), do: reason
   defp exit_reason(_other), do: :unknown
+
+  # -- writes ------------------------------------------------------------
+
+  # A two-branch `cond` with a literal `true` fallback is an `if` in a
+  # costume; written as one so the two things this function actually decides
+  # -- "is a timer already armed for this type" and, only if not, "when
+  # should it fire" -- read as the two questions they are rather than a
+  # sequence of guard clauses.
+  defp arm_flush(state, type) do
+    if MapSet.member?(state.flush_armed, type) do
+      state
+    else
+      case Writes.due_in(state.writes, type, now()) do
+        :never ->
+          state
+
+        delay ->
+          Process.send_after(self(), {:flush, type}, delay)
+          %{state | flush_armed: MapSet.put(state.flush_armed, type)}
+      end
+    end
+  end
+
+  defp send_write(state, type, rid, body) do
+    client = state.client
+
+    task =
+      Task.Supervisor.async_nolink(Bridge.tasks(state.name), fn ->
+        Resource.update(client, type, rid, body)
+      end)
+
+    %{state | write_tasks: Map.put(state.write_tasks, task.ref, {type, rid})}
+  end
+
+  # A write has no caller waiting by the time it fails -- `write/4` already
+  # returned `:ok` before the PUT was even sent, let alone answered -- so the
+  # failure has exactly two ways out: telemetry, and an error event to
+  # whoever subscribed. Dropping it silently would make a bridge that rejects
+  # every write indistinguishable from one that accepts them.
+  defp report_write_failure(state, {type, rid}, %Error{} = error) do
+    :telemetry.execute(
+      [:hue, :write, :failed],
+      %{},
+      %{bridge: state.name, type: type, rid: rid, reason: error.reason}
+    )
+
+    event = %Event{type: :error, resource_type: type, rid: rid, data: error}
+    dispatch(state, event, Cache.name_of(state.table, type, rid))
+  end
+
+  defp now, do: System.monotonic_time(:millisecond)
 
   # -- dispatch ----------------------------------------------------------
 

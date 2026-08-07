@@ -188,6 +188,37 @@ defmodule Hue.Bridge do
   @spec list(atom(), atom()) :: {:ok, [map()]} | {:error, Error.t()}
   def list(name \\ @default_name, type), do: Cache.list(table(name), type)
 
+  @doc """
+  Queues a write to one resource.
+
+  Returns `:ok` as soon as the write is queued, **before** the bridge has been
+  asked. That is deliberate on two counts. The PUT's response is not the
+  truth — the state change arrives as an event a moment later, and blocking
+  on the response would pretend otherwise. And nothing can be coalesced if
+  every caller is already waiting on their own request.
+
+  Failures surface as `[:hue, :write, :failed]` telemetry and as an `error`
+  event to subscribers, because by then there is no caller to return them to.
+  Local errors — a capability the light does not have, a malformed option —
+  are caught before anything is queued, by `Hue.Light.set/3` and friends.
+
+  Most callers want `Hue.Light.set/3`, `Hue.Room.set/3`, or `Hue.Zone.set/3`.
+  This is the unwrapped form, for a resource type those do not cover.
+  """
+  @spec write(atom(), atom(), String.t(), map()) :: :ok | {:error, Error.t()}
+  def write(name \\ @default_name, type, rid, body) when is_map(body) do
+    # `GenServer.cast/2` to a missing *named* process does not raise — it
+    # returns `:ok` and silently drops the message — so a `catch :exit,
+    # {:noproc, _}` around the cast looks defensive but never fires. Checking
+    # `Process.whereis/1` first is the only way this actually reports
+    # `:not_started` instead of quietly accepting a write no bridge will ever
+    # see.
+    case Process.whereis(server(name)) do
+      nil -> {:error, %Error{reason: :not_started}}
+      pid -> GenServer.cast(pid, {:write, type, rid, body})
+    end
+  end
+
   @doc "The name a rid is known by, or `nil`."
   @spec name_of(atom(), atom(), String.t()) :: String.t() | nil
   def name_of(name \\ @default_name, type, rid), do: Cache.name_of(table(name), type, rid)
