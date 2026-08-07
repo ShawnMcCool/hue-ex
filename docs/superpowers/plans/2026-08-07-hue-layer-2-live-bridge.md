@@ -2775,6 +2775,37 @@ A consumer waiting on button presses must not wake up for all nineteen lights wh
 
 **Names are resolved before the event is applied**, deliberately. A `delete` removes the resource and its index entries, so resolving afterwards would mean a subscriber who asked for "Iris" never hears that Iris was deleted — the one event they most needed. The cost is that a rename notifies under the old name; that is the correct reading of "which subscription does this event concern", since the subscriber asked about the thing they knew as Iris.
 
+> **Constraint on the tests, discovered in Task 8 — read before writing them.**
+>
+> **`Hue.Stub` cannot push a frame on a connection that stays open.** Req's test
+> adapter runs a function plug to completion and only converts the accumulated
+> `Plug.Conn.chunk/2` calls into `{ref, {:data, _}}` messages once the plug
+> *returns*. `Hue.Stub`'s chunk loop blocks until `:close`, so a frame sent
+> without a following close is never observed by the consumer. This was measured:
+> a frame sent alone was still unobserved 1.5 seconds later.
+>
+> So the `push(stream, resources)`-then-`push`-again shape sketched below **does
+> not work**. `test/support/eventstream_server.ex` is not a substitute either —
+> Req's `:plug` replaces the whole transport, so a function-plug stub for
+> fetch/PUT cannot be mixed with a real socket for the eventstream on one client.
+>
+> Write the tests to the protocol instead, which is what the bridge actually does:
+> **one frame carries many envelopes, and each envelope carries many resource
+> deltas.** A test needing three events sends one frame with three envelopes.
+> That is closer to recorded hardware behaviour than pushing frames one at a
+> time, so this is a constraint worth designing to rather than working around.
+>
+> For the cases that genuinely need *separate* deliveries — the dead-subscriber
+> test is the real one, since it must push, kill the subscriber, and push again —
+> use Task 8's `deliver_and_close/2` twice, with `reconnect_after` set long enough
+> that the reconnect does not fire mid-assertion, or awaited deliberately if the
+> second delivery needs a fresh connection.
+>
+> Every `assert_receive` on a `{:hue_stub, _}` message needs a **generous explicit
+> timeout**. ExUnit's 100 ms default loses under the suite's `max_cases: 24` — that
+> cost Task 8 a 16% full-suite flake rate that never reproduced when the file ran
+> alone.
+
 **Files:**
 - Modify: `lib/hue/bridge/server.ex` (dispatch after apply)
 - Modify: `lib/hue/bridge.ex` (`subscribe/2`, `unsubscribe/2`)
