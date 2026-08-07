@@ -28,7 +28,10 @@ defmodule Hue.Bridge.Names do
 
   alias Hue.Resource
 
-  @self_named ~w(room zone scene smart_scene device)
+  # device is deliberately absent: it has its own entries_for/1 clause below,
+  # because a device contributes both its own entry and a walk of its
+  # services, not just its own entry the way these four do.
+  @named_without_services ~w(room zone scene smart_scene)
 
   @doc """
   Returns every index entry implied by `resources`, as `{key, value}` pairs
@@ -49,7 +52,7 @@ defmodule Hue.Bridge.Names do
   end
 
   defp entries_for(%{"type" => type, "id" => rid, "metadata" => %{"name" => name}})
-       when is_binary(rid) and is_binary(name) and type in @self_named do
+       when is_binary(rid) and is_binary(name) and type in @named_without_services do
     pair(Resource.type(type), rid, name)
   end
 
