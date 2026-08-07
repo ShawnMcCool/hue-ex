@@ -108,13 +108,24 @@ defmodule Hue.Stub do
   end
 
   # -1 means "fail forever"; any other value counts down and stops failing at 0.
+  #
+  # :counters.sub/3 on an :atomics counter always returns :ok — it has no
+  # bounds checking and cannot report failure — so its return value is not a
+  # condition to branch on. The decrement is a side effect; whether this call
+  # is still failing is decided by the :counters.get/2 read above it.
   defp failing?(_counter, nil), do: false
 
   defp failing?(counter, _status) do
     case :counters.get(counter, 1) do
-      0 -> false
-      -1 -> true
-      _positive -> :counters.sub(counter, 1, 1) == :ok
+      0 ->
+        false
+
+      -1 ->
+        true
+
+      _positive ->
+        :counters.sub(counter, 1, 1)
+        true
     end
   end
 

@@ -208,6 +208,18 @@ defmodule Hue.ResourceTest do
   end
 
   describe "telemetry" do
+    # A handler attached with :telemetry_test.attach_event_handlers/2 is not
+    # scoped to this test's own calls -- it fires for every [:hue, :request]
+    # span anywhere in the (async, concurrent) suite, all forwarded to this
+    # process under this test's own ref. The ref proves a message came from
+    # *this* handler; it says nothing about which test's request produced the
+    # underlying event. Capturing `metadata` loosely and asserting on it
+    # afterward let a same-named event from a *different*, concurrently
+    # running test satisfy the receive first -- observed directly: a stop
+    # event for this request seen alongside a start event whose path and
+    # method belonged to another test's PUT. Matching the expected content
+    # inside the receive pattern itself, as :telemetry_test's own docs do,
+    # is what keeps the match specific to this call.
     test "emits start and stop around a read", %{client: client} do
       ref =
         :telemetry_test.attach_event_handlers(self(), [
@@ -221,8 +233,8 @@ defmodule Hue.ResourceTest do
 
       Resource.list(client, :light)
 
-      assert_received {[:hue, :request, :start], ^ref, %{monotonic_time: _}, metadata}
-      assert %{method: :get, path: "/resource/light"} = metadata
+      assert_received {[:hue, :request, :start], ^ref, %{monotonic_time: _},
+                       %{method: :get, path: "/resource/light"}}
 
       assert_received {[:hue, :request, :stop], ^ref, %{duration: _}, %{result: :ok}}
     end

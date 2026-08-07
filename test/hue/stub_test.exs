@@ -55,7 +55,13 @@ defmodule Hue.StubTest do
 
     task = Task.async(fn -> client |> Hue.Events.stream() |> Enum.to_list() end)
 
-    assert_receive {:hue_stub, :eventstream, stream}
+    # A generous timeout, not a leisurely one: this is a cross-process
+    # handshake (the Task's Req request reaching the plug and sending back
+    # its pid), and the default 100ms occasionally loses that race under a
+    # loaded scheduler -- measured as an intermittent failure here when run
+    # as part of the full suite, never in isolation. See events_test.exs's
+    # own eventstream test for the same allowance against a real socket.
+    assert_receive {:hue_stub, :eventstream, stream}, 5_000
 
     send(
       stream,
