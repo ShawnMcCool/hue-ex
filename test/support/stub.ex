@@ -43,6 +43,12 @@ defmodule Hue.Stub do
       process until that process is torn down; nothing in this stub ever
       releases it.
     * `:eventstream_status` — an HTTP status to refuse the eventstream with.
+    * `:retry` — `true` to leave Req's own retry (`:safe_transient`) enabled
+      on the client, instead of this stub's usual `retry: false`. For proving
+      what a caller that forgets to strip it would look like — see
+      `Hue.Bridge.Server`'s `without_retry/1` — never for anything that wants
+      the scripted failure counts above to mean what they say: left on, Req
+      consumes them itself before a single call returns control.
   """
 
   @default_body ~s({"errors":[{"description":"stubbed failure"}],"data":[]})
@@ -57,32 +63,39 @@ defmodule Hue.Stub do
     fetch_status = Keyword.get(options, :fetch_status)
     fetch_hang = Keyword.get(options, :fetch_hang, false)
     eventstream_status = Keyword.get(options, :eventstream_status)
+    retry_enabled? = Keyword.get(options, :retry, false)
 
     # A counter rather than an Agent: it is shared across every process that
     # makes a request, and it needs no supervision or cleanup.
     remaining_failures = :counters.new(1, [:atomics])
     :counters.put(remaining_failures, 1, Keyword.get(options, :fetch_failures, -1))
 
+    # Req retries a 503 by default (:safe_transient), which would run the
+    # plug — and so consume the failure counter below — more than once per
+    # call the test makes. That is desirable against a real bridge and wrong
+    # here: it silently multiplies each stubbed failure into two or three,
+    # which is how "fail twice, then succeed" became "fail once, in a call
+    # that never returned control to the test in between." `retry: true`
+    # opts back into Req's default specifically to make that multiplication
+    # observable — see the moduledoc.
+    retry_option = if retry_enabled?, do: [], else: [retry: false]
+
     {:ok, client} =
-      Hue.new("192.0.2.10",
-        application_key: "k",
-        # Req retries a 503 by default (:safe_transient), which would run the
-        # plug — and so consume the failure counter below — more than once per
-        # call the test makes. That is desirable against a real bridge and
-        # wrong here: it silently multiplies each stubbed failure into two or
-        # three, which is how "fail twice, then succeed" became "fail once, in
-        # a call that never returned control to the test in between."
-        retry: false,
-        plug: fn conn ->
-          route(conn, %{
-            test: test,
-            resources: resources,
-            fetch_status: fetch_status,
-            fetch_hang: fetch_hang,
-            eventstream_status: eventstream_status,
-            remaining_failures: remaining_failures
-          })
-        end
+      Hue.new(
+        "192.0.2.10",
+        [
+          application_key: "k",
+          plug: fn conn ->
+            route(conn, %{
+              test: test,
+              resources: resources,
+              fetch_status: fetch_status,
+              fetch_hang: fetch_hang,
+              eventstream_status: eventstream_status,
+              remaining_failures: remaining_failures
+            })
+          end
+        ] ++ retry_option
       )
 
     client

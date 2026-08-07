@@ -151,6 +151,69 @@ defmodule Hue.BridgeTest do
     assert {:ok, [%{"id" => "light-2"}]} = Bridge.list(other, :light)
   end
 
+  test "two bridges start under a real supervisor with no explicit :id", %{name: name} do
+    other = Module.concat(name, Other)
+
+    # Unlike start/3 above, this uses `{Bridge, ...}` child specs directly,
+    # with no `id:` override — that override is exactly what would paper over
+    # a broken `Hue.Bridge.child_spec/1`. `use Supervisor`'s generated
+    # default :ids every child by module, so two of these would collide on
+    # `Hue.Bridge` and this supervisor would fail to start at all unless
+    # `child_spec/1` keys `:id` on `:name` the way it is documented to.
+    children = [
+      {Bridge, name: name, client: Hue.Stub.client(resources: [light("light-1")])},
+      {Bridge, name: other, client: Hue.Stub.client(resources: [light("light-2")])}
+    ]
+
+    sup =
+      start_supervised!(%{
+        id: :two_bridges_no_explicit_id,
+        start: {Supervisor, :start_link, [children, [strategy: :one_for_one]]}
+      })
+
+    assert is_pid(sup)
+
+    await_live(name)
+    await_live(other)
+
+    assert {:ok, [%{"id" => "light-1"}]} = Bridge.list(name, :light)
+    assert {:ok, [%{"id" => "light-2"}]} = Bridge.list(other, :light)
+  end
+
+  test "without_retry/1 keeps Req's own retry from multiplying a stubbed failure",
+       %{name: name} do
+    # Req's default retry (:safe_transient) would itself retry a 503 with
+    # exponential backoff, invoking the plug again before Resource.list_all/1
+    # ever returns to sync/1. With fetch_failures: 1 that second, Req-internal
+    # attempt already succeeds — so if the bridge did not strip retry, this
+    # single logical sync attempt would produce two fetches before the
+    # server's own retry_after is ever consulted. retry_after is set far
+    # longer than any delay Req's own backoff could produce for one retry, so
+    # a second fetch showing up inside that window can only be Req's.
+    client =
+      Hue.Stub.client(
+        retry: true,
+        fetch_failures: 1,
+        fetch_status: 503,
+        resources: [light("light-1")]
+      )
+
+    start(name, client, retry_after: 10_000)
+
+    assert_receive {:hue_stub, :fetch, "/clip/v2/resource"}, 1_000
+
+    # Req's own backoff for one retry is ~0.9-1.0s (exponential-with-jitter,
+    # retry count 0). Waiting past that — comfortably short of retry_after —
+    # is what makes the check below mean something: a bare, no-wait
+    # refute_received right after the line above would still pass, because
+    # Req's retry has not slept its delay yet. Sleeping first is the fix, not
+    # a nicety; without it this test cannot fail even when without_retry/1 is
+    # deleted (measured while writing it).
+    Process.sleep(1_500)
+
+    refute_received {:hue_stub, :fetch, _}
+  end
+
   defp light(rid), do: %{"type" => "light", "id" => rid, "on" => %{"on" => false}}
 
   defp first_light_rid do

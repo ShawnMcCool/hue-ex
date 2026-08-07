@@ -30,6 +30,26 @@ defmodule Hue.Bridge do
   stream keeps serving its last known state while reporting the error, because
   state that is seconds stale beats no state at all.
 
+  ## A stream drop and a server crash are not the same failure, on purpose
+
+  Losing the eventstream (Task 8) leaves the cache serving its last known
+  state, stale but trustworthy — reconnecting is an expected condition on a
+  home network, not evidence the cached data is wrong. A `Hue.Bridge.Server`
+  crash is different: it is a bug, and the ETS table dies with the process
+  that owned it (the table is not named-and-heir-protected — nothing survives
+  the crash to keep it alive). The replacement server starts clean and
+  resyncs, so readers briefly see `:not_started` rather than the last state a
+  now-dead process wrote.
+
+  That is the correct trade, not an oversight. State written by a process that
+  then crashed is exactly the state you should not keep serving — a crash
+  means something about the sync was already wrong, not merely delayed. An
+  heir process could preserve the table across the crash, but that buys
+  continuity at the price of possibly-corrupt state, in exchange for
+  surviving a case (a crash) that should not happen in the first place. Clean
+  restart plus resync is the honest response; only a stream drop earns "stale
+  beats nothing."
+
   ## Options
 
     * `:name` — the name this bridge is addressed by. Defaults to `Hue.Bridge`.
@@ -66,6 +86,14 @@ defmodule Hue.Bridge do
   end
 
   @default_name __MODULE__
+
+  # A flapping bridge (503s, timeouts) never reaches this budget: sync/1
+  # handles those without crashing, via its own Process.send_after retry.
+  # This budget is for genuine bugs in the server or its children — the
+  # signal that something is structurally broken, not merely offline — so it
+  # stays tight rather than tolerant.
+  @max_restarts 3
+  @max_seconds 60
 
   @doc """
   Builds this bridge's child spec, `:id`ed by its `:name` rather than the
@@ -118,7 +146,11 @@ defmodule Hue.Bridge do
     # :rest_for_one, because the server holds the names of the registry and the
     # task supervisor. If either restarts, the server's assumptions about them
     # are stale and it must restart too. The reverse is not true.
-    Supervisor.init(children, strategy: :rest_for_one, max_restarts: 3, max_seconds: 60)
+    Supervisor.init(children,
+      strategy: :rest_for_one,
+      max_restarts: @max_restarts,
+      max_seconds: @max_seconds
+    )
   end
 
   @doc "What the bridge's connection is currently doing."
@@ -137,6 +169,20 @@ defmodule Hue.Bridge do
   @doc "Resolves a name-or-rid target to the resource it names."
   @spec resolve(atom(), atom(), String.t()) :: {:ok, map()} | {:error, Error.t()}
   def resolve(name \\ @default_name, type, target), do: Graph.resolve(table(name), type, target)
+
+  @doc """
+  Resolves a room or zone target to the `grouped_light` that acts for it.
+
+  A thin delegation to `Hue.Bridge.Graph.grouped_light/3`, kept beside
+  `resolve/3` rather than left for `Hue.Room` and `Hue.Zone` (Task 14) to
+  reach `Graph` directly. `table/1` is `@doc false` — an internal seam, not
+  public API — so anything outside this module that needs the graph walk
+  would otherwise have to go around that boundary to get it. One entry point
+  for the public surface; everything else stays private.
+  """
+  @spec grouped_light(atom(), :room | :zone, String.t()) :: {:ok, map()} | {:error, Error.t()}
+  def grouped_light(name \\ @default_name, type, target),
+    do: Graph.grouped_light(table(name), type, target)
 
   @doc "Every resource of one type."
   @spec list(atom(), atom()) :: {:ok, [map()]} | {:error, Error.t()}
