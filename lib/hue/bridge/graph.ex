@@ -57,10 +57,8 @@ defmodule Hue.Bridge.Graph do
   """
   @spec resolve(Cache.table(), atom(), String.t()) :: {:ok, map()} | {:error, Error.t()}
   def resolve(table, type, target) when is_binary(target) do
-    case Cache.fetch(table, type, target) do
-      {:ok, resource} -> {:ok, resource}
-      {:error, %Error{reason: :not_found}} -> Cache.fetch_by_name(table, type, target)
-      {:error, _reason} = error -> error
+    with {:error, %Error{reason: :not_found}} <- Cache.fetch(table, type, target) do
+      Cache.fetch_by_name(table, type, target)
     end
   end
 
