@@ -212,11 +212,20 @@ defmodule Hue.Bridge do
   change.
 
   Subscribing again with the **same** filter is a no-op: you get one
-  subscription, not two, which is what makes it safe to call from
-  `mount/3` on both the dead render and the connected one without an
-  `if connected?(socket)` guard. Subscribing with **different** filters is
-  a genuinely different subscription each time — an event matching both
-  delivers twice, because that is what you asked for.
+  subscription, not two. The registry is `:duplicate`, so without that check a
+  second `subscribe/2` adds a second entry and doubles every matching event
+  **permanently** — and a single `unsubscribe/2` then removes both, leaving no
+  way back to single delivery short of unsubscribing and starting again.
+
+  The case it protects is one process subscribing more than once: a callback
+  that re-runs whatever set the subscription up, or several components sharing
+  a process and each asking for the same events. A process that subscribes and
+  then dies is *not* that case — `Registry` monitors it and removes the entry
+  regardless.
+
+  Subscribing with **different** filters is a genuinely different subscription
+  each time — an event matching both delivers twice, because that is what you
+  asked for.
 
   ## A note on names
 
