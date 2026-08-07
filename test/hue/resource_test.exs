@@ -269,4 +269,38 @@ defmodule Hue.ResourceTest do
       assert_received {[:hue, :request, :stop], ^ref, _measurements, %{result: :error}}
     end
   end
+
+  test "list_all/1 returns every resource on the bridge in one request", %{client: client} do
+    Req.Test.stub(__MODULE__, fn conn ->
+      assert conn.request_path == "/clip/v2/resource"
+      assert Plug.Conn.get_req_header(conn, "hue-application-key") == ["k"]
+      Req.Test.json(conn, %{"errors" => [], "data" => Hue.Fixtures.full_state()["data"]})
+    end)
+
+    assert {:ok, resources} = Resource.list_all(client)
+    assert length(resources) == 178
+    assert Enum.count(resources, &(&1["type"] == "light")) == 19
+  end
+
+  test "list_all/2 surfaces partial success like list/3 does", %{client: client} do
+    Req.Test.stub(__MODULE__, fn conn ->
+      Req.Test.json(conn, %{"errors" => [%{"description" => "partly"}], "data" => []})
+    end)
+
+    assert {:ok, [], [%{"description" => "partly"}]} =
+             Resource.list_all(client, return: :detailed)
+  end
+
+  test "type/1 converts a documented resource type to an atom" do
+    assert Resource.type("light") == :light
+    assert Resource.type("grouped_light") == :grouped_light
+  end
+
+  test "type/1 leaves an unknown type as a string rather than creating an atom" do
+    assert Resource.type("type_signify_invents_in_2027") == "type_signify_invents_in_2027"
+  end
+
+  test "type/1 passes nil through" do
+    assert Resource.type(nil) == nil
+  end
 end

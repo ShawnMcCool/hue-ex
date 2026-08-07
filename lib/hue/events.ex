@@ -43,6 +43,7 @@ defmodule Hue.Events do
   alias Hue.Client
   alias Hue.Error
   alias Hue.Event
+  alias Hue.Resource
 
   @resource_path "/clip/v2"
   @eventstream_path "/eventstream/clip/v2"
@@ -56,22 +57,6 @@ defmodule Hue.Events do
 
   @envelope_type_names ~w(add update delete error)
   @envelope_types Map.new(@envelope_type_names, &{&1, String.to_atom(&1)})
-
-  # The resource types CLIP v2 documents. Kept as a table rather than reached
-  # through String.to_atom/1 so that a name from the network never becomes an
-  # atom; see Hue.Event on what happens to the ones that are not here.
-  @resource_type_names ~w(
-    auth_v1 behavior_instance behavior_script bridge bridge_home button
-    camera_motion clip contact device device_mode device_power
-    device_software_update entertainment entertainment_configuration geofence
-    geofence_client geolocation grouped_light grouped_light_level
-    grouped_motion homekit light light_level matter matter_fabric motion
-    private_group public_image relative_rotary room scene service_group
-    smart_scene tamper taurus_7455 temperature wifi_connectivity
-    zgp_connectivity zigbee_bridge_connectivity zigbee_connectivity
-    zigbee_device_discovery zone
-  )
-  @resource_types Map.new(@resource_type_names, &{&1, String.to_atom(&1)})
 
   @doc "Decodes a complete buffer of SSE bytes."
   @spec decode(binary()) :: [Event.t()]
@@ -348,8 +333,7 @@ defmodule Hue.Events do
   defp envelope_type(type) when is_binary(type), do: Map.get(@envelope_types, type, type)
   defp envelope_type(nil), do: nil
 
-  defp resource_type(type) when is_binary(type), do: Map.get(@resource_types, type, type)
-  defp resource_type(nil), do: nil
+  defp resource_type(type), do: Resource.type(type)
 
   defp dropped(what, term) do
     Logger.warning(

@@ -55,12 +55,52 @@ defmodule Hue.Resource do
   @known_options [:return]
   @return_modes [:simple, :detailed]
 
+  # The resource types CLIP v2 documents. Kept as a table rather than reached
+  # through String.to_atom/1 so that a name from the network never becomes an
+  # atom; see Hue.Event on what happens to the ones that are not here.
+  @resource_type_names ~w(
+    auth_v1 behavior_instance behavior_script bridge bridge_home button
+    camera_motion clip contact device device_mode device_power
+    device_software_update entertainment entertainment_configuration geofence
+    geofence_client geolocation grouped_light grouped_light_level
+    grouped_motion homekit light light_level matter matter_fabric motion
+    private_group public_image relative_rotary room scene service_group
+    smart_scene tamper taurus_7455 temperature wifi_connectivity
+    zgp_connectivity zigbee_bridge_connectivity zigbee_connectivity
+    zigbee_device_discovery zone
+  )
+  @resource_types Map.new(@resource_type_names, &{&1, String.to_atom(&1)})
+
   @doc "Lists every resource of one type."
   @spec list(Client.t(), type(), keyword()) ::
           {:ok, list()} | {:ok, list(), list()} | {:error, Error.t()}
   def list(%Client{} = client, type, options \\ []) when is_atom(type) do
     request(client, :get, "/resource/#{type}", nil, nil, options, & &1)
   end
+
+  @doc """
+  Lists every resource on the bridge in one request.
+
+  This is what seeds `Hue.Bridge`'s cache. The reference bridge answers with
+  178 resources across 22 types in roughly 154 KB, which is why reconnecting
+  refetches everything rather than resuming the eventstream from an id.
+  """
+  @spec list_all(Client.t(), keyword()) ::
+          {:ok, list()} | {:ok, list(), list()} | {:error, Error.t()}
+  def list_all(%Client{} = client, options \\ []) do
+    request(client, :get, "/resource", nil, nil, options, & &1)
+  end
+
+  @doc """
+  Converts a resource type from the wire into an atom, when this library knows it.
+
+  An unrecognised type is returned as the string it arrived as. A name from the
+  network must never become an atom: the atom table is not garbage collected,
+  and a bridge firmware that invents a type should not be able to grow it.
+  """
+  @spec type(String.t() | nil) :: atom() | String.t() | nil
+  def type(name) when is_binary(name), do: Map.get(@resource_types, name, name)
+  def type(nil), do: nil
 
   @doc """
   Fetches one resource by rid.
