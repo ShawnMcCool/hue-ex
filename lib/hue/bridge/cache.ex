@@ -30,6 +30,33 @@ defmodule Hue.Bridge.Cache do
   to answer. `Hue.Bridge.status/1` is how a consumer learns the difference, and
   `[:hue, :stream, :disconnected]` is how it learns without asking.
 
+  ## Never remove before inserting
+
+  `seed/2` and `reindex/1` both replace a whole set of keys — every resource on
+  a reseed, both name indexes on a reindex. An earlier version did that by
+  deleting first and inserting after (`:ets.delete_all_objects/1`, or
+  `:ets.match_delete/2` ahead of the rebuild). Since reads never go through
+  this process, that opens a window any concurrent reader can land in: the
+  table briefly looks unseeded, or a name that still exists briefly cannot be
+  found. On a reconnect that window reproduces the exact lie this module
+  promises not to tell — a bridge that synced an hour ago reporting
+  `:not_synced`, indistinguishable from a bridge that has never synced.
+
+  The fix is the same shape in both functions: **insert the new state first,
+  then delete whatever key the new state does not contain.** A key that
+  survives the reseed is overwritten in place and is never briefly absent. A
+  key that does not survive is removed only after its replacement — the union
+  of everything else — is already in the table, so the deletion is the only
+  observable change and it is exactly the one the new state calls for.
+
+  `@seeded_key` and `@status_key` are never candidates for either prune step —
+  the match specs that find keys to delete can only match resource keys
+  (`{type, rid}`) or index keys (`{:name, type, name}` / `{:rid_name, type,
+  rid}`), the same structural guarantee documented under "Key shapes" below.
+  No function in this module ever deletes `@seeded_key` or `@status_key` once
+  set; `put_status/2` overwrites `@status_key` in place, and nothing removes
+  it first.
+
   ## Key shapes
 
   | Key | Value |
@@ -64,21 +91,24 @@ defmodule Hue.Bridge.Cache do
   end
 
   @doc """
-  Replaces the cache's entire contents with `resources` and rebuilds both name
-  indexes.
-
-  Replacement rather than merge is what makes reconnect correct: a resource
-  deleted while the stream was down disappears here, and there is no path by
-  which a stale resource outlives a refetch.
+  Replaces the cache's entire resource set with `resources` and rebuilds both
+  name indexes, insert-then-prune throughout — see "Never remove before
+  inserting" above. `@status_key` is never written here: it was never removed,
+  so there is nothing to restore. `@seeded_key` is set last, so the *first*
+  seed still gates reads as `:not_synced` right up until the table is actually
+  populated; a reseed leaves it `true` throughout, because nothing before this
+  final insert ever unset it.
   """
   @spec seed(table(), [map()]) :: :ok
   def seed(table, resources) when is_list(resources) do
-    status = status(table)
+    entries = Enum.map(resources, &{{type_of(&1), rid_of(&1)}, &1})
+    keys = MapSet.new(entries, &elem(&1, 0))
 
-    :ets.delete_all_objects(table)
-    :ets.insert(table, Enum.map(resources, &{{type_of(&1), rid_of(&1)}, &1}))
-    :ets.insert(table, Names.entries(resources))
-    :ets.insert(table, {@status_key, status})
+    :ets.insert(table, entries)
+    prune_resources(table, keys)
+
+    reindex(table)
+
     :ets.insert(table, {@seeded_key, true})
 
     :ok
@@ -206,15 +236,47 @@ defmodule Hue.Bridge.Cache do
 
   defp reindexing?(data), do: Map.has_key?(data, "metadata") or Map.has_key?(data, "services")
 
+  # Insert-then-prune — see the moduledoc's "Never remove before inserting".
+  # Computing `entries` from the table's current resources and inserting them
+  # before deleting anything means an index lookup running concurrently with a
+  # reindex either finds the old mapping or the new one, never neither.
   defp reindex(table) do
-    :ets.match_delete(table, {{:name, :_, :_}, :_})
-    :ets.match_delete(table, {{:rid_name, :_, :_}, :_})
-    :ets.insert(table, Names.entries(resources(table)))
+    entries = Names.entries(resources(table))
+    keys = MapSet.new(entries, &elem(&1, 0))
+
+    :ets.insert(table, entries)
+    prune_index(table, keys)
+
     :ok
+  end
+
+  defp prune_resources(table, keys) do
+    table
+    |> resource_keys()
+    |> Enum.reject(&MapSet.member?(keys, &1))
+    |> Enum.each(&:ets.delete(table, &1))
+  end
+
+  defp prune_index(table, keys) do
+    table
+    |> index_keys()
+    |> Enum.reject(&MapSet.member?(keys, &1))
+    |> Enum.each(&:ets.delete(table, &1))
   end
 
   defp resources(table) do
     :ets.select(table, [{{{:"$1", :"$2"}, :"$3"}, [], [:"$3"]}])
+  end
+
+  defp resource_keys(table) do
+    :ets.select(table, [{{{:"$1", :"$2"}, :_}, [], [{{:"$1", :"$2"}}]}])
+  end
+
+  defp index_keys(table) do
+    :ets.select(table, [
+      {{{:name, :"$1", :"$2"}, :_}, [], [{{:name, :"$1", :"$2"}}]},
+      {{{:rid_name, :"$1", :"$2"}, :_}, [], [{{:rid_name, :"$1", :"$2"}}]}
+    ])
   end
 
   defp type_of(resource), do: Hue.Resource.type(resource["type"])

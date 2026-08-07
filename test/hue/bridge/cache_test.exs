@@ -90,6 +90,25 @@ defmodule Hue.Bridge.CacheTest do
     assert {:error, %Error{reason: :not_found}} = Cache.fetch(table, :light, "light-2")
   end
 
+  test "a reseed still prunes orphaned names", %{table: table} do
+    Cache.seed(table, [light("light-1"), device("Desk Lamp", "device-1", "light-1")])
+
+    Cache.seed(table, [light("light-1")])
+
+    assert {:error, %Error{reason: :not_found}} = Cache.fetch_by_name(table, :light, "Desk Lamp")
+  end
+
+  test "a reseed does not disturb the lifecycle facts", %{table: table} do
+    Cache.seed(table, [light("light-1")])
+    Cache.put_status(table, :live)
+
+    Cache.seed(table, [light("light-2")])
+
+    assert Cache.status(table) == :live
+    assert {:ok, %{"id" => "light-2"}} = Cache.fetch(table, :light, "light-2")
+    assert {:error, %Error{reason: :not_found}} = Cache.fetch(table, :light, "light-1")
+  end
+
   test "an update event deep-merges instead of replacing", %{table: table} do
     Cache.seed(table, [light("light-1")])
 
