@@ -14,13 +14,34 @@ defmodule Hue.Bridge.Body do
   rather than being treated as a per-light capability question. This module
   deliberately does **not** validate against a light's `min_dim_level`: that
   is a physical floor that varies by bulb, and clamping a legal percentage up
-  to it is the bridge's job, not this library's — see `fragment/2`'s
+  to it is the bridge's job, not this library's — see `translate/2`'s
   `:brightness` clause.
 
   `color: "#ff8800"` sent to a white-only bulb is not a bug. It is a mismatch
   between what the code asked for and what is screwed into a lamp in the
   user's house, which the code could not have known, so it **returns**
   `{:error, %Hue.Error{reason: :not_color_capable}}`.
+
+  ## Every option is validated before any option is translated
+
+  `build/2` runs in two passes rather than one. The first, `validate_option!/1`,
+  walks every option and checks its *value* — no resource, no capability, no
+  I/O — and raises on the first malformed one it finds. Only once every option
+  in the call has passed does the second pass, `translate/2`, touch the
+  resource at all.
+
+  The split exists because a single `Enum.reduce_while/3` pass that validated
+  and translated together let the *wrong* kind of wrongness win by accident.
+  `Body.build([color: "#ff8800", brightness: "loud"], a_colourless_light)`
+  under that shape resolved `:color` first, found a genuine capability
+  mismatch, and `reduce_while` halted there — so `brightness: "loud"`, a bug
+  in the caller's own source, was never reached and never raised. The bug got
+  reported as "this light has no colour support," which sends whoever reads
+  that message to look at their light fixture instead of their code. Splitting
+  validation out means a malformed option raises **regardless of the order
+  options were given in and regardless of what any other option's capability
+  check would have found** — the property the moduledoc always claimed but
+  the single-pass version did not actually have.
 
   ## Capabilities are checked before the request leaves
 
@@ -29,17 +50,39 @@ defmodule Hue.Bridge.Body do
   and interpreting the rejection: no round trip, and an error that names the
   light rather than quoting a CLIP description. The reference bridge has two
   lights with no `dimming` key at all, so `:not_dimmable` is a case real
-  users hit, not a defensive branch.
+  users hit, not a defensive branch. Option order still decides which
+  capability error is reported when two options each fail on a different
+  capability — that is a caller with two real problems, and reporting the
+  first one honestly is not a bug the way the paragraph above was.
 
-  ## Colour and colour temperature delegate rather than duplicate
+  ## Colour and colour temperature mostly delegate rather than duplicate
 
-  `:color` and `:kelvin` do not check capability here. `Hue.Color.payload/2`
-  and `Hue.Color.mirek_for/2` already return
+  `Hue.Color.payload/2` and `Hue.Color.mirek_for/2` return
   `{:error, %Hue.Error{reason: :not_color_capable, rid: ...}}` for a light
   with no `"color"` or no `"color_temperature"` key — confirmed against
-  layer 1 directly before writing this module. A second check here would be
-  a second place for the two to drift; there would be no way to notice a
-  mismatch except by hand.
+  layer 1 directly before writing this module — so `translate/2`'s `:color`
+  and `:kelvin` clauses do not check capability themselves; a second check
+  here would be a second place for the two to drift.
+
+  But `Hue.Color.payload/2` was found to have the *same* masking shape this
+  module just removed from its own option list, one level down: given a
+  light with no colour capability at all, it returns `:not_color_capable`
+  for **any** input, well-formed or not, because it checks the light's gamut
+  before it ever inspects the input — `Hue.Color.payload(42, colourless_light)`
+  and `Hue.Color.payload("#ff8800", colourless_light)` come back identically.
+  A value that could never be a colour under any of `Hue.Color`'s accepted
+  input shapes (see `t:Hue.Color.input/0`) is exactly the caller-bug case
+  this module exists to catch, so `validate_option!/1` rejects those shapes
+  itself — a bare number, an atom, a string that is not a hex code, a tuple
+  of the wrong arity or element types — before `translate/2` ever runs.
+  What it does **not** attempt is hex-digit correctness or an RGB component's
+  `0..255` range: those are validated by `Hue.Color.to_xy/2` itself, and it
+  already raises for them (`Color.InvalidHexError`, `Color.InvalidComponentError`)
+  whenever it is actually reached. That residual — an out-of-range or
+  malformed-but-correctly-shaped colour sent to a colourless light — still
+  reports as `:not_color_capable`, because fixing it requires reaching into
+  `Hue.Color.to_xy/2`'s own gamut-first check, and that module's job is
+  colour, not option validation.
   """
 
   alias Hue.Color
@@ -51,18 +94,24 @@ defmodule Hue.Bridge.Body do
   Builds the request body for `options` against `resource`.
 
   Returns `{:ok, body}`, or `{:error, %Hue.Error{}}` for a capability the
-  resource does not have. Raises `ArgumentError` for a malformed option or an
-  option this module does not know.
-
-  Options are applied in the order given. The first capability failure halts
-  the rest — later options are never attempted, and never reported — while a
-  malformed option raises immediately regardless of position, because
-  `validate_options!/1` runs before any option is translated.
+  resource does not have. Raises `ArgumentError` for an unknown option or a
+  malformed value — always, regardless of where in `options` it appears and
+  regardless of what any other option's capability check would have found.
+  See the moduledoc's "Every option is validated before any option is
+  translated".
   """
   @spec build(keyword(), map()) :: {:ok, map()} | {:error, Error.t()}
   def build(options, resource) when is_list(options) and is_map(resource) do
     validate_options!(options)
+    Enum.each(options, &validate_option!/1)
+    translate(options, resource)
+  end
 
+  # Capability-dependent. By the time this runs, validate_option!/1 has
+  # already accepted every option's value on its own terms, so the only
+  # things left that can go wrong here are facts about `resource` — this
+  # returns {:ok, body} or a genuine %Hue.Error{}, never raises.
+  defp translate(options, resource) do
     Enum.reduce_while(options, {:ok, %{}}, fn option, {:ok, body} ->
       case fragment(option, resource) do
         {:ok, fragment} -> {:cont, {:ok, Map.merge(body, fragment)}}
@@ -71,16 +120,11 @@ defmodule Hue.Bridge.Body do
     end)
   end
 
-  defp fragment({:on, value}, _resource) when is_boolean(value) do
+  defp fragment({:on, value}, _resource) do
     {:ok, %{"on" => %{"on" => value}}}
   end
 
-  defp fragment({:on, value}, _resource) do
-    raise ArgumentError, "on: expects a boolean, got: #{inspect(value)}"
-  end
-
-  defp fragment({:brightness, value}, resource)
-       when is_number(value) and value >= 0 and value <= 100 do
+  defp fragment({:brightness, value}, resource) do
     if Map.has_key?(resource, "dimming") do
       {:ok, %{"dimming" => %{"brightness" => value / 1}}}
     else
@@ -88,33 +132,72 @@ defmodule Hue.Bridge.Body do
     end
   end
 
-  defp fragment({:brightness, value}, _resource) do
-    raise ArgumentError,
-          "brightness: expects a number between 0 and 100 (a CLIP v2 percentage), got: #{inspect(value)}"
-  end
-
-  defp fragment({:transition, value}, _resource) when is_integer(value) and value >= 0 do
-    {:ok, %{"dynamics" => %{"duration" => value}}}
-  end
-
   defp fragment({:transition, value}, _resource) do
-    raise ArgumentError,
-          "transition: expects a non-negative integer of milliseconds, got: #{inspect(value)}"
+    {:ok, %{"dynamics" => %{"duration" => value}}}
   end
 
   defp fragment({:color, value}, resource) do
     Color.payload(value, resource)
   end
 
-  defp fragment({:kelvin, value}, resource) when is_integer(value) and value > 0 do
+  defp fragment({:kelvin, value}, resource) do
     case Color.mirek_for(value, resource) do
       {:ok, mirek} -> {:ok, %{"color_temperature" => %{"mirek" => mirek}}}
       {:error, _reason} = error -> error
     end
   end
 
-  defp fragment({:kelvin, value}, _resource) do
+  # Resource-independent. Every clause here either returns :ok or raises —
+  # never a %Hue.Error{} — because a malformed value was never valid on any
+  # light, not just the one in this call.
+  defp validate_option!({:on, value}) when is_boolean(value), do: :ok
+
+  defp validate_option!({:on, value}) do
+    raise ArgumentError, "on: expects a boolean, got: #{inspect(value)}"
+  end
+
+  defp validate_option!({:brightness, value})
+       when is_number(value) and value >= 0 and value <= 100 do
+    :ok
+  end
+
+  defp validate_option!({:brightness, value}) do
+    raise ArgumentError,
+          "brightness: expects a number between 0 and 100 (a CLIP v2 percentage), got: #{inspect(value)}"
+  end
+
+  defp validate_option!({:transition, value}) when is_integer(value) and value >= 0, do: :ok
+
+  defp validate_option!({:transition, value}) do
+    raise ArgumentError,
+          "transition: expects a non-negative integer of milliseconds, got: #{inspect(value)}"
+  end
+
+  defp validate_option!({:kelvin, value}) when is_integer(value) and value > 0, do: :ok
+
+  defp validate_option!({:kelvin, value}) do
     raise ArgumentError, "kelvin: expects a positive integer, got: #{inspect(value)}"
+  end
+
+  # Shape only — matches exactly what Hue.Color.to_xy/2's own clauses accept
+  # (t:Hue.Color.input/0). Hex-digit correctness and the 0..255 component
+  # range are deliberately left to Hue.Color, which validates and raises for
+  # both once a light with colour capability actually reaches them — see the
+  # moduledoc's "Colour and colour temperature mostly delegate" section for
+  # why this line is drawn where it is rather than duplicating that check.
+  defp validate_option!({:color, "#" <> _}), do: :ok
+
+  defp validate_option!({:color, {:xy, x, y}}) when is_number(x) and is_number(y), do: :ok
+
+  defp validate_option!({:color, {r, g, b}})
+       when is_integer(r) and is_integer(g) and is_integer(b) do
+    :ok
+  end
+
+  defp validate_option!({:color, value}) do
+    raise ArgumentError,
+          "color: expects a hex string like \"#ff8800\", an {r, g, b} tuple, or an " <>
+            "{:xy, x, y} tuple, got: #{inspect(value)}"
   end
 
   # `Enum.uniq/1` before the subtraction is load-bearing, not decoration.
@@ -124,7 +207,7 @@ defmodule Hue.Bridge.Body do
   # `:on` behind after the first is cancelled out, and without the dedupe
   # that survivor is reported as "unknown option(s) [:on]": a real option,
   # called an unknown one. Deduping first means a repeated known option is
-  # accepted (later values win, via `Map.merge/3` in `build/2`, the same
+  # accepted (later values win, via `Map.merge/3` in `translate/2`, the same
   # last-one-wins rule any keyword-list API applies), and only names genuinely
   # absent from `@known_options` are ever reported.
   defp validate_options!(options) do

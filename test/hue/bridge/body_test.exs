@@ -139,10 +139,41 @@ defmodule Hue.Bridge.BodyTest do
              Body.build([on: true, brightness: 40], plain_light())
   end
 
-  test "a caller bug still raises even after a capability failure would have fired first" do
+  test "a caller bug raises even when a genuine capability error would have fired first" do
+    assert_raise ArgumentError, ~r/brightness/, fn ->
+      Body.build([color: "#ff8800", brightness: "loud"], plain_light())
+    end
+  end
+
+  test "the raise happens regardless of option order — the property is order-independence" do
     assert_raise ArgumentError, ~r/brightness/, fn ->
       Body.build([brightness: "loud", color: "#ff8800"], plain_light())
     end
+  end
+
+  test "a capability error still returns when every option is well-formed" do
+    assert {:error, %Error{reason: :not_color_capable}} =
+             Body.build([color: "#ff8800"], plain_light())
+  end
+
+  test "a colour value that is not one of Hue.Color's accepted shapes raises, even against a colourless light" do
+    # Hue.Color.payload/2 checks the light's gamut before it ever inspects the
+    # input, so against a colourless light it answers :not_color_capable for
+    # *any* input, well-formed or not — see the moduledoc. A shape this
+    # library could never have turned into a colour is this module's own
+    # caller-bug case, so it must raise here rather than surface as a
+    # capability mismatch the caller did not actually have.
+    assert_raise ArgumentError, ~r/color/, fn -> Body.build([color: 42], plain_light()) end
+
+    assert_raise ArgumentError, ~r/color/, fn ->
+      Body.build([color: "not-a-colour"], plain_light())
+    end
+
+    assert_raise ArgumentError, ~r/color/, fn -> Body.build([color: %{}], plain_light()) end
+  end
+
+  test "a colour value that is not one of Hue.Color's accepted shapes raises against a colour-capable light too" do
+    assert_raise ArgumentError, ~r/color/, fn -> Body.build([color: 42], light()) end
   end
 
   test "a grouped_light accepts on and brightness like a light does" do
