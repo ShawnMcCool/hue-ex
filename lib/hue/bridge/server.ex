@@ -288,18 +288,20 @@ defmodule Hue.Bridge.Server do
   end
 
   # A write task's normal completion. `Resource.update/5` never raises for an
-  # HTTP-level failure -- it returns `{:error, %Error{}}` -- so `:ok` and
-  # `{:error, _}` are the only shapes actually reached here; `_other` exists
-  # only so a change to `Resource.update/5`'s contract fails a test rather
-  # than crashing this server.
+  # HTTP-level failure -- it returns `{:error, %Error{}}` -- and `send_write/4`
+  # always asks for `return: :detailed`, so `{:ok, _data, _errors}` and
+  # `{:error, %Error{}}` are the only two shapes this ever sees; `write_error/1`
+  # tells them apart, including the partial-success case a bare `:ok`/`{:error,
+  # _}` match would have missed. It is genuinely reachable -- exercised by
+  # every test in this file that scripts `:put_errors` -- not defensive
+  # boilerplate.
   def handle_info({ref, result}, %{write_tasks: tasks} = state) when is_map_key(tasks, ref) do
     Process.demonitor(ref, [:flush])
     {target, tasks} = Map.pop(tasks, ref)
 
-    case result do
-      :ok -> :ok
-      {:error, error} -> report_write_failure(state, target, error)
-      _other -> :ok
+    case write_error(result) do
+      nil -> :ok
+      %Error{} = error -> report_write_failure(state, target, error)
     end
 
     {:noreply, %{state | write_tasks: tasks}}
@@ -490,16 +492,47 @@ defmodule Hue.Bridge.Server do
     end
   end
 
+  # `return: :detailed` is not optional here. In the default `:simple` mode
+  # `Resource.interpret/2` matches on `%{"data" => data}` alone and discards
+  # `errors` outright -- built for `update/5`'s ordinary caller, who gets
+  # back the rid they already had either way and has no use for an errors
+  # list `:simple` mode was never going to hand them. That silently turned a
+  # write the bridge partly rejected -- HTTP 200, `data` *and* `errors` both
+  # non-empty -- into a plain `:ok`. Every write this server sends needs the
+  # errors list precisely because nothing else is watching for it: unlike
+  # `Resource.update/5`'s direct caller, this server's caller (`write/4`) is
+  # long gone by the time the response arrives.
   defp send_write(state, type, rid, body) do
     client = state.client
 
     task =
       Task.Supervisor.async_nolink(Bridge.tasks(state.name), fn ->
-        Resource.update(client, type, rid, body)
+        Resource.update(client, type, rid, body, return: :detailed)
       end)
 
     %{state | write_tasks: Map.put(state.write_tasks, task.ref, {type, rid})}
   end
+
+  # `nil` for a write the bridge fully accepted, an `%Error{}` otherwise.
+  # `{:ok, _data, []}` and `{:ok, _data, [_ | _]}` are the two shapes
+  # `return: :detailed` produces for a 2xx response; `{:error, %Error{}}` is
+  # everything below the application layer -- a non-2xx status or a
+  # transport failure. CLIP v2 carries no numeric error codes for either
+  # case (see `Hue.Error`'s moduledoc), so a partial rejection's reason is
+  # built the same way `Hue.Resource`'s own `interpret/2` already builds one
+  # for a *total* failure at HTTP 200 -- `Error.transport/2` tagged
+  # `:unexpected_response`, carrying whatever description the bridge sent
+  # rather than a reason this library would have to invent. `error["description"]`
+  # rather than a pattern match: an error entry missing that key becomes a
+  # `nil` description, not a crash in the one code path with no caller left
+  # to raise to.
+  defp write_error({:ok, _data, []}), do: nil
+
+  defp write_error({:ok, _data, [error | _]}) do
+    Error.transport(:unexpected_response, description: error["description"])
+  end
+
+  defp write_error({:error, %Error{} = error}), do: error
 
   # A write has no caller waiting by the time it fails -- `write/4` already
   # returned `:ok` before the PUT was even sent, let alone answered -- so the

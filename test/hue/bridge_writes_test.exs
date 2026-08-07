@@ -267,6 +267,96 @@ defmodule Hue.BridgeWritesTest do
                    @receive_timeout
   end
 
+  # A write the bridge answers with HTTP 200 but a non-empty `errors`
+  # alongside `data` is not a transport failure — `Resource.update/5` in its
+  # default `:simple` mode would report it as a plain `:ok`, because
+  # `Resource.interpret/2` matches on `data` alone and discards `errors`.
+  # `send_write/4` asks for `return: :detailed` specifically so this is
+  # visible here rather than silently treated as success.
+  test "a partially rejected write surfaces as telemetry and an error event carrying the bridge's description" do
+    name = Hue.BridgeWritesTest.PartialWrite
+    resources = [%{"type" => "light", "id" => "light-1", "on" => %{"on" => false}}]
+
+    client =
+      Hue.Stub.client(
+        resources: resources,
+        put_errors: [%{"description" => "brightness out of range"}]
+      )
+
+    start_supervised!({Bridge, name: name, client: client}, id: name)
+    assert_receive {:hue_stub, :eventstream, _stream}, @receive_timeout
+    await_live(name)
+
+    handler = {__MODULE__, name, :partial_write_failed}
+    test = self()
+
+    :telemetry.attach(
+      handler,
+      [:hue, :write, :failed],
+      fn _e, measurements, metadata, _c ->
+        send(test, {:write_failed, measurements, metadata})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    assert :ok = Bridge.subscribe(name)
+
+    Bridge.write(name, :light, "light-1", %{"dimming" => %{"brightness" => 150}})
+
+    assert_receive {:write_failed, %{},
+                    %{bridge: ^name, type: :light, rid: "light-1", reason: :unexpected_response}},
+                   @receive_timeout
+
+    assert_receive {:hue,
+                    %Event{
+                      type: :error,
+                      resource_type: :light,
+                      rid: "light-1",
+                      data: %Error{
+                        reason: :unexpected_response,
+                        description: "brightness out of range"
+                      }
+                    }},
+                   @receive_timeout
+  end
+
+  test "a write the bridge fully accepts is not reported as a failure" do
+    name = Hue.BridgeWritesTest.CleanWrite
+    resources = [%{"type" => "light", "id" => "light-1", "on" => %{"on" => false}}]
+    client = Hue.Stub.client(resources: resources)
+
+    start_supervised!({Bridge, name: name, client: client}, id: name)
+    assert_receive {:hue_stub, :eventstream, _stream}, @receive_timeout
+    await_live(name)
+
+    handler = {__MODULE__, name, :clean_write_failed}
+    test = self()
+
+    :telemetry.attach(
+      handler,
+      [:hue, :write, :failed],
+      fn _e, measurements, metadata, _c ->
+        send(test, {:write_failed, measurements, metadata})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    assert :ok = Bridge.subscribe(name)
+
+    Bridge.write(name, :light, "light-1", %{"on" => %{"on" => true}})
+
+    assert_receive {:hue_stub, :put, "/clip/v2/resource/light/light-1", _body}, @receive_timeout
+
+    # A bounded window, not a bare refute_receive: proving nothing arrives
+    # needs time for it to have arrived in, or the assertion is vacuous.
+    refute_receive {:write_failed, _measurements, _metadata}, 200
+    refute_receive {:hue, %Event{type: :error}}, 200
+  end
+
   # -- the PUT is genuinely off the server's stack --------------------------
 
   # The plan this task follows from admits its own version of this test

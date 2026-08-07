@@ -47,6 +47,11 @@ defmodule Hue.Stub do
     * `:put_failures` — how many writes fail with `:put_status` before the
       stub starts succeeding. Omit for "every write fails". Mirrors
       `:fetch_failures`.
+    * `:put_errors` — a list of CLIP v2 error maps (e.g.
+      `[%{"description" => "brightness out of range"}]`) to answer a write
+      with **alongside** a non-empty `data`, at HTTP 200 — a genuine partial
+      success/rejection, distinct from `:put_status`, which fails the whole
+      write outright at the HTTP layer. Defaults to `[]` (a clean success).
     * `:put_hang` — when `true`, a write never answers. Mirrors `:fetch_hang`
       — it is what proves a PUT genuinely runs off the caller's stack rather
       than merely answering fast enough that the difference doesn't show.
@@ -72,6 +77,7 @@ defmodule Hue.Stub do
     fetch_hang = Keyword.get(options, :fetch_hang, false)
     put_status = Keyword.get(options, :put_status)
     put_hang = Keyword.get(options, :put_hang, false)
+    put_errors = Keyword.get(options, :put_errors, [])
     eventstream_status = Keyword.get(options, :eventstream_status)
     retry_enabled? = Keyword.get(options, :retry, false)
 
@@ -109,6 +115,7 @@ defmodule Hue.Stub do
               fetch_hang: fetch_hang,
               put_status: put_status,
               put_hang: put_hang,
+              put_errors: put_errors,
               eventstream_status: eventstream_status,
               remaining_fetch_failures: remaining_fetch_failures,
               remaining_put_failures: remaining_put_failures
@@ -162,7 +169,15 @@ defmodule Hue.Stub do
     if failing?(config.remaining_put_failures, config.put_status) do
       refuse(conn, config.put_status)
     else
-      json(conn, 200, %{"errors" => [], "data" => []})
+      # A genuine CLIP v2 partial-success body carries both a non-empty
+      # `data` and a non-empty `errors` at HTTP 200 -- an outright failure
+      # goes through `:put_status` instead, which never reaches this
+      # branch. `data` is populated whenever `:put_errors` is, even though
+      # nothing here inspects its contents, so a test scripting a partial
+      # rejection is exercising the same shape the reference bridge sends
+      # rather than one with the `data` half of "partial" missing.
+      data = if config.put_errors == [], do: [], else: [%{"rid" => "stub-partial"}]
+      json(conn, 200, %{"errors" => config.put_errors, "data" => data})
     end
   end
 
