@@ -498,16 +498,18 @@ steps most likely to block a new user. The `precommit` alias mirrors `bravia`:
 
 ## Consuming from Fae
 
-Out of scope here; Fae's integration gets its own design and its own decision
-record. During development Fae uses `{:hue, path: "../hue-ex"}`, moving to
+Out of scope here; Fae's integration is its own piece of work. During
+development Fae uses `{:hue, path: "../hue-ex"}`, moving to
 `{:hue, "~> 0.1"}` once published. Fae will own a `Hue.Bridge` child in the
 `Fae.HomeAutomation` subtree, subscribe, and rebroadcast onto `Phoenix.PubSub`
 per decisions 006, 015, and 027 — the library never learns that Phoenix exists.
 
-Two consequences Fae must weigh in its own record, not this one: the application
-key is a stored credential needing the same treatment decision-044 gave the
-BRAVIA PSK, and lighting makes `NightDimming` an automation with several targets
-rather than one, which is a redesign of that module rather than an addition to it.
+Two consequences belong to Fae rather than to this library: the application key
+is a stored credential needing the same treatment decision-044 gave the BRAVIA
+PSK, and lighting makes `NightDimming` an automation with several targets rather
+than one, which is a redesign of that module rather than an addition to it. The
+second is the one worth thinking about before writing code; whether either
+warrants a decision record is a call for whoever does the work.
 
 Fae currently resolves `req` at 0.5.17. Its `~> 0.5` requirement permits 0.7.x,
 so there is no constraint conflict, but the lock will need `mix deps.update req`.
