@@ -95,6 +95,36 @@ defmodule Hue.ColorTest do
         Color.to_xy("#zzzzzz", light)
       end
     end
+
+    test "a malformed colour raises against a colourless light too — the caller bug does not depend on what is plugged in" do
+      white = "light" |> Hue.Fixtures.resources() |> Enum.find(&(not Map.has_key?(&1, "color")))
+
+      assert_raise Elixir.Color.InvalidComponentError, fn ->
+        Color.to_xy({300, 0, 0}, white)
+      end
+
+      assert_raise Elixir.Color.InvalidHexError, fn ->
+        Color.to_xy("#zzzzzz", white)
+      end
+
+      assert_raise FunctionClauseError, fn ->
+        Color.to_xy("not-a-colour", white)
+      end
+
+      assert_raise FunctionClauseError, fn ->
+        Color.to_xy(42, white)
+      end
+    end
+
+    test "a well-formed colour against a colourless light still reports :not_color_capable" do
+      white = "light" |> Hue.Fixtures.resources() |> Enum.find(&(not Map.has_key?(&1, "color")))
+
+      assert {:error, %Hue.Error{reason: :not_color_capable}} = Color.to_xy("#ff8800", white)
+      assert {:error, %Hue.Error{reason: :not_color_capable}} = Color.to_xy({255, 136, 0}, white)
+
+      assert {:error, %Hue.Error{reason: :not_color_capable}} =
+               Color.to_xy({:xy, 0.4, 0.4}, white)
+    end
   end
 
   describe "payload/2" do

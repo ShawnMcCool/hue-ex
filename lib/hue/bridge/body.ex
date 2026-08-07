@@ -64,25 +64,22 @@ defmodule Hue.Bridge.Body do
   and `:kelvin` clauses do not check capability themselves; a second check
   here would be a second place for the two to drift.
 
-  But `Hue.Color.payload/2` was found to have the *same* masking shape this
-  module just removed from its own option list, one level down: given a
-  light with no colour capability at all, it returns `:not_color_capable`
-  for **any** input, well-formed or not, because it checks the light's gamut
-  before it ever inspects the input — `Hue.Color.payload(42, colourless_light)`
-  and `Hue.Color.payload("#ff8800", colourless_light)` come back identically.
-  A value that could never be a colour under any of `Hue.Color`'s accepted
-  input shapes (see `t:Hue.Color.input/0`) is exactly the caller-bug case
-  this module exists to catch, so `validate_option!/1` rejects those shapes
-  itself — a bare number, an atom, a string that is not a hex code, a tuple
-  of the wrong arity or element types — before `translate/2` ever runs.
-  What it does **not** attempt is hex-digit correctness or an RGB component's
-  `0..255` range: those are validated by `Hue.Color.to_xy/2` itself, and it
-  already raises for them (`Color.InvalidHexError`, `Color.InvalidComponentError`)
-  whenever it is actually reached. That residual — an out-of-range or
-  malformed-but-correctly-shaped colour sent to a colourless light — still
-  reports as `:not_color_capable`, because fixing it requires reaching into
-  `Hue.Color.to_xy/2`'s own gamut-first check, and that module's job is
-  colour, not option validation.
+  `Hue.Color.to_xy/2` (which `payload/2` calls) validates its input before it
+  ever consults the light's gamut, so a value that could never be a colour
+  under any of its accepted input shapes (see `t:Hue.Color.input/0`) raises
+  there regardless of what is plugged into the socket. `validate_option!/1`
+  rejects the same shapes itself, earlier and with a message that names the
+  option — a bare number, an atom, a string that is not a hex code, a tuple
+  of the wrong arity or element types — before `translate/2` ever runs. What
+  it does **not** attempt is hex-digit correctness or an RGB component's
+  `0..255` range: those are shapes `validate_option!/1` accepts as
+  well-formed (any `"#"`-prefixed string, any integer-tupled `{r, g, b}`),
+  and only `Hue.Color.to_xy/2` inspects their content, raising
+  (`Color.InvalidHexError`, `Color.InvalidComponentError`) once a colour-
+  capable light actually reaches them. Against a colourless light, a value
+  well-formed enough to survive both checks — correct hex digits, RGB
+  components in range — still reports as `:not_color_capable`, which is the
+  one case that genuinely is a capability mismatch rather than a caller bug.
   """
 
   alias Hue.Color

@@ -157,12 +157,10 @@ defmodule Hue.Bridge.BodyTest do
   end
 
   test "a colour value that is not one of Hue.Color's accepted shapes raises, even against a colourless light" do
-    # Hue.Color.payload/2 checks the light's gamut before it ever inspects the
-    # input, so against a colourless light it answers :not_color_capable for
-    # *any* input, well-formed or not — see the moduledoc. A shape this
-    # library could never have turned into a colour is this module's own
-    # caller-bug case, so it must raise here rather than surface as a
-    # capability mismatch the caller did not actually have.
+    # A shape this library could never have turned into a colour is this
+    # module's own caller-bug case, so validate_option!/1 raises here itself
+    # rather than letting it reach Hue.Color and surface as a capability
+    # mismatch the caller did not actually have — see the moduledoc.
     assert_raise ArgumentError, ~r/color/, fn -> Body.build([color: 42], plain_light()) end
 
     assert_raise ArgumentError, ~r/color/, fn ->

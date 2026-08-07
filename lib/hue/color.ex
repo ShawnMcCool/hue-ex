@@ -69,27 +69,27 @@ defmodule Hue.Color do
   """
   @spec to_xy(input(), map()) :: {:ok, Gamut.point()} | {:error, Error.t()}
   def to_xy(input, light) do
-    case Gamut.from_light(light) do
-      nil ->
-        {:error,
-         %Error{
-           reason: :not_color_capable,
-           rid: light["id"],
-           description: "this light reports no colour support"
-         }}
+    with {:ok, point} <- to_chromaticity(input) do
+      case Gamut.from_light(light) do
+        nil ->
+          {:error,
+           %Error{
+             reason: :not_color_capable,
+             rid: light["id"],
+             description: "this light reports no colour support"
+           }}
 
-      {:error, :invalid_gamut} ->
-        {:error,
-         %Error{
-           reason: :invalid_gamut,
-           rid: light["id"],
-           description: "this light's reported gamut data could not be parsed"
-         }}
+        {:error, :invalid_gamut} ->
+          {:error,
+           %Error{
+             reason: :invalid_gamut,
+             rid: light["id"],
+             description: "this light's reported gamut data could not be parsed"
+           }}
 
-      gamut ->
-        with {:ok, point} <- to_chromaticity(input) do
+        gamut ->
           {:ok, Gamut.clamp(gamut, point)}
-        end
+      end
     end
   end
 
