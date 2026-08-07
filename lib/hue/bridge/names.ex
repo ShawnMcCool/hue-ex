@@ -37,9 +37,12 @@ defmodule Hue.Bridge.Names do
   Returns every index entry implied by `resources`, as `{key, value}` pairs
   ready for `:ets.insert/2`.
 
-  Order is unspecified and duplicates are possible when two devices share a
-  name — the later insert wins, which is the same arbitrary-but-stable choice
-  the Hue app makes when you name two lights identically.
+  Two devices can share a name — the Hue app does not stop a user from doing
+  it — and when they do, this function returns two entries with the same
+  key, in the order their devices appeared in `resources`. That ordering is
+  the only guarantee made here: what a consumer does with two entries sharing
+  a key (an `:ets.insert/2` on a `set` table keeps only the last) is the
+  consumer's business, not this module's.
   """
   @spec entries([map()]) :: [{tuple(), String.t()}]
   def entries(resources) when is_list(resources) do

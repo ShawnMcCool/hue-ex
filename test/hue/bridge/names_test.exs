@@ -83,6 +83,40 @@ defmodule Hue.Bridge.NamesTest do
     assert {{:name, "taurus_9999", "Odd"}, "x-1"} in entries
   end
 
+  test "two devices sharing a name produce entries in resource order" do
+    resources = [
+      device("Lamp", [service("light", "light-1")]),
+      device("Lamp", [service("light", "light-2")])
+    ]
+
+    entries = Names.entries(resources)
+
+    rids_for_lamp =
+      for {{:name, :light, "Lamp"}, rid} <- entries, do: rid
+
+    assert rids_for_lamp == ["light-1", "light-2"]
+  end
+
+  test "a device with an empty services list contributes only its own entry" do
+    entries = Names.entries([device("Bare", [])])
+
+    assert entries == [
+             {{:name, :device, "Bare"}, "device-Bare"},
+             {{:rid_name, :device, "device-Bare"}, "Bare"}
+           ]
+  end
+
+  test "a device with no services key contributes only its own entry" do
+    device = %{"type" => "device", "id" => "device-Bare", "metadata" => %{"name" => "Bare"}}
+
+    entries = Names.entries([device])
+
+    assert entries == [
+             {{:name, :device, "Bare"}, "device-Bare"},
+             {{:rid_name, :device, "device-Bare"}, "Bare"}
+           ]
+  end
+
   test "the real fixture names all nineteen lights" do
     entries = Names.entries(Hue.Fixtures.full_state()["data"])
 
