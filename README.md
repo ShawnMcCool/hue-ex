@@ -121,6 +121,121 @@ nothing is ever blocked on a missing wrapper. `list/3` and `create/4` return
 return a bare `:ok`, because the bridge answers a write with only the rid you
 already had. The state change itself arrives on the eventstream.
 
+## Layer 2 — the live model
+
+Layer 1 is a protocol client: every call is a request. That is the right shape
+for a script and the wrong shape for an application, because "dim the living
+room" over layer 1 means listing rooms, finding one by name, walking its
+services, and then writing — several round trips, every time.
+
+`Hue.Bridge` keeps a live model instead. It fetches the full state once, follows
+the eventstream, and answers reads from ETS.
+
+```elixir
+children = [
+  {Hue.Bridge, name: MyApp.Hue, client: client}
+]
+```
+
+It never starts itself. You place it in your supervision tree, the way you place
+Finch or Redix.
+
+```elixir
+{:ok, light} = Hue.Light.get(MyApp.Hue, "Desk Lamp")
+:ok = Hue.Light.set(MyApp.Hue, "Iris", color: "#ff8800", brightness: 40)
+:ok = Hue.Room.set(MyApp.Hue, "Living Room", on: false)
+:ok = Hue.Scene.recall(MyApp.Hue, "Relax")
+```
+
+Targets are names or rids, interchangeably. `Hue.Light`, `Hue.Room`, `Hue.Zone`,
+and `Hue.Scene` cover the name-addressable operations; `Hue.Bridge.write/4` and
+`Hue.Resource` remain available underneath for anything not wrapped.
+
+### Reads do not touch the process
+
+`Hue.Light.get/2` is an `:ets.lookup` in your process. It does not message the
+bridge, does not serialise against other readers, and does not queue behind an
+eventstream frame being merged.
+
+Writes are the opposite, deliberately: they go through the process because that
+is the only place coalescing and Hue's rate limits can live. Twenty slider drags
+on one light become one request carrying the last value.
+
+`set` returns `:ok` once the write is queued, not once it is applied — the PUT's
+response is not the truth, and the state change arrives as an event a moment
+later. Pass `await: true` when you need confirmation:
+
+```elixir
+:ok = Hue.Light.set(MyApp.Hue, "Iris", on: true, await: true)
+```
+
+A room or zone with no `grouped_light` service — two of the six rooms on the
+reference bridge are like this — answers
+`{:error, %Hue.Error{reason: :no_grouped_light}}` rather than inventing one to
+write to. A capability mismatch, like `brightness:` against a non-dimmable
+light, is caught from the cache before the request leaves at all.
+
+### Subscribing
+
+```elixir
+Hue.Bridge.subscribe(MyApp.Hue, type: :button)
+
+def handle_info({:hue, %Hue.Event{} = event}, state), do: ...
+```
+
+Filtering happens at the registry. A process waiting on button presses is not
+woken when a scene changes nineteen lights. Subscribe with no filter for
+everything, or with `name:` / `rid:` for one resource.
+
+### The failure that is silent
+
+A dead eventstream does not announce itself. Every read keeps answering, and
+every answer is quietly stale — the bridge sends no keepalive, so an idle stream
+is indistinguishable from a dead one at the protocol level. `Hue.Bridge` detects
+it at the transport layer and reconnects with backoff, refetching the full state
+each time rather than resuming from an event id.
+
+Attach to `[:hue, :stream, :disconnected]` if you want to know. It is the single
+most useful thing to monitor about this library.
+
+## Telemetry
+
+```
+[:hue, :request, :start | :stop | :exception]   duration, method, path, result
+[:hue, :pairing, :start | :stop | :exception]   duration, method, path, result
+[:hue, :sync, :stop]                            duration, resource_count
+[:hue, :stream, :connected]                     downtime
+[:hue, :stream, :disconnected]                  reason
+[:hue, :write, :coalesced]                      collapsed_count, type, rid
+[:hue, :write, :failed]                         type, rid, reason
+```
+
+> **Corrected before 0.2.0.** This table previously listed `type, rid, status`
+> for `[:hue, :request, *]`. That was never what `Hue.Resource` emits: its
+> span metadata is `%{method:, path:}` at `:start`, with `:result` (`:ok` or
+> `:error`) added at `:stop` — no `type`, `rid`, or `status` key ever appears.
+> `rid` in particular would be useful (a handler wanting to know which light a
+> slow request concerned currently cannot), but adding it is a behaviour
+> change to what the span carries, not a documentation fix — noted as a
+> possible follow-up, not done here.
+>
+> **Corrected again, closing the final review of layer 2.** The two write
+> rows were missing `type` and `rid`, which `Hue.Bridge.Server` has carried in
+> both events' metadata since each was introduced — this table just never
+> listed them.
+
+`[:hue, :request, *]` and `[:hue, :pairing, *]` (layer 1, via
+`:telemetry.span/3`) fire around every `Hue.Resource` call and every
+`Hue.Pairing.pair/2` call, respectively. Everything else is layer 2, emitted
+by the `Hue.Bridge` process for whichever bridge it concerns
+(`metadata.bridge` is the name you gave `Hue.Bridge`'s `:name` option).
+
+`[:hue, :stream, :disconnected]` is the one worth attaching to unconditionally.
+This library's characteristic failure mode is silent: a dropped eventstream
+leaves every read answering, and every answer quietly stale, because there is
+no keepalive to miss and reads never ask the process how current its data is.
+That event is the only thing that reveals it.
+
 ## Trust model
 
 Be clear-eyed about this one, because the honest version is genuinely useful and
@@ -286,54 +401,58 @@ you; a caller bug raises.
 
 ## Scope
 
-This is a **stateless protocol client**, and that is the whole of it. It starts
-no processes, holds no state between calls, caches nothing, and reconnects
-nothing. It reaches every CLIP v2 resource type generically, so it is never the
-thing blocking you.
+Layer 1 (`Hue`, `Hue.Client`, `Hue.Resource`, and friends) is a **stateless
+protocol client**: it starts no processes, holds no state between calls,
+caches nothing, and reconnects nothing. It reaches every CLIP v2 resource type
+generically, so it is never the thing blocking you. Layer 2 (`Hue.Bridge` and
+the name-addressable modules above it) opts into exactly one supervised
+process per bridge you configure — see "Layer 2" above. Neither layer starts
+anything you did not ask for.
 
-What it deliberately does not do:
+What this library deliberately does not do:
 
-- **No live bridge model.** Hue models a home as a graph of 38 cross-linked
-  resource types, so the useful operations are all joins: "dim the living room"
-  means find the `room` by name, walk its services, select the `grouped_light`,
-  write to that. A layer 2 — a supervised process holding an ETS cache kept
-  current from the eventstream, with name-based addressing and write coalescing —
-  is designed and not built. Reads would come from ETS in the calling process;
-  writes would serialise through the process, which is the only place rate
-  limiting can live. Until it exists, do the joins yourself against
-  `Hue.Resource`.
 - **No Entertainment streaming.** The DTLS-based low-latency protocol is out of
   scope. Pairing does request `generateclientkey: true` and hands you the
   `clientkey`, so adding Entertainment later stays additive and nobody has to
   re-pair to get a key they were never given.
-- **No configuration system, no process to supervise, no application to start.**
-  `Hue.Client` wraps a `Req.Request`, so your timeouts, your retry policy, and
-  your test stubs are configured the way you already configure Req.
+- **No configuration system beyond `Hue.Bridge`'s own options.** `Hue.Client`
+  wraps a `Req.Request`, so your timeouts, your retry policy, and your test
+  stubs are configured the way you already configure Req.
 
 ## Testing
 
 ```
-mix test                  # offline, no network, 308 tests
-mix test --include live   # adds 11 tests against real hardware
+mix test                  # offline, no network, 516 tests
+mix test --include live   # adds 17 tests against real hardware
 mix precommit             # compile --warnings-as-errors, format, credo --strict, dialyzer, test
 ```
 
 The offline suite runs against bytes recorded from a real BSB002 — a full
 178-resource state dump, real eventstream frames, and the bridge's actual HTML
 403 page — plus synthetic certificates generated at test time for the pinning
-paths. It touches no network.
+paths, and `Hue.Stub`'s function-plug bridge for `Hue.Bridge`. It touches no
+network.
 
-The live suite is read-only. Every request it makes is a `GET`; it never pairs,
-never writes, and never deletes. Point it at your own bridge:
+Point the live suite at your own bridge:
 
 ```
 HUE_HOST=192.168.178.146 HUE_KEY=your-application-key mix test --include live
 ```
 
 It is excluded by default, so an ordinary `mix test` never reaches for the
-network. It earns its keep: the session-resumption bypass described above was
-found by a live test and cannot be reproduced against fixtures, because each
-synthetic listener gets a fresh port and so has no session to resume.
+network. The layer-1 tests in it are read-only — every request is a `GET`; it
+never pairs, never writes, never deletes. The layer-2 tests are
+**read-and-restore**: `Hue.Bridge` exists to be written to, so those tests
+toggle a real light or nudge a real brightness and use `on_exit/1` to put it
+back before the test process ends, win or lose. Nothing it touches is left
+changed.
+
+The live suite earns its keep. The session-resumption bypass described above
+was found by a live test and cannot be reproduced against fixtures, because
+each synthetic listener gets a fresh port and so has no session to resume —
+and the layer-2 tests exist to check `Hue.Bridge.Writes`'s coalescing and
+pacing against a real bridge's actual rate limit, rather than trusting that
+`Hue.Stub`'s model of one agrees with it.
 
 ## Licence
 

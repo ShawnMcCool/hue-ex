@@ -256,7 +256,14 @@ defmodule Hue.ClientTest do
     test "says nothing when a pin is actually in force" do
       bridge = %Bridge.Info{host: "192.0.2.10", fingerprint: @pin}
 
-      assert ExUnit.CaptureLog.capture_log(fn -> Hue.from_bridge(bridge) end) == ""
+      # Not `== ""`: async: true means a concurrently-running test's unrelated
+      # warning can land in this capture too (ExUnit.CaptureLog broadcasts every
+      # log event to every currently-active capture, VM-wide, with no per-process
+      # attribution — see ExUnit.CaptureServer.log/2). Scope the refutation to
+      # the one warning this describe block is about, not to total silence.
+      log = ExUnit.CaptureLog.capture_log(fn -> Hue.from_bridge(bridge) end)
+
+      refute log =~ "has no pinned fingerprint"
     end
 
     test "says nothing when the caller supplies the pin the bridge lacks" do
@@ -264,7 +271,7 @@ defmodule Hue.ClientTest do
 
       log = ExUnit.CaptureLog.capture_log(fn -> Hue.from_bridge(bridge, fingerprint: @pin) end)
 
-      assert log == ""
+      refute log =~ "has no pinned fingerprint"
     end
 
     test "defaults the port to 443, as Bridge.Info does" do

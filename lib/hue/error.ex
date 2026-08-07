@@ -15,6 +15,19 @@ defmodule Hue.Error do
 
   Match on `:reason`. It is stable across all three.
 
+  ## Reasons owned by layer 2
+
+  Most reasons above come from the bridge or the transport. Two are raised
+  locally by `Hue.Bridge`, layer 2's live model, and never by anything in this
+  module:
+
+  * `:not_started` — no `Hue.Bridge` is running under the name you addressed.
+    You asked a live model that does not exist; add its `child_spec/1` to your
+    supervision tree.
+  * `:not_synced` — the bridge is running but has not completed its first full
+    fetch, so the cache cannot answer yet. Transient; `Hue.Bridge.status/1`
+    reports `:connecting` or `:syncing` while it lasts.
+
   ## What this struct does and does not mean
 
   An `Error` means something outside the process refused the call — the bridge or
@@ -41,6 +54,8 @@ defmodule Hue.Error do
           | :not_color_capable
           | :invalid_gamut
           | :no_grouped_light
+          | :not_started
+          | :not_synced
           | :timeout
           | :econnrefused
           | :closed

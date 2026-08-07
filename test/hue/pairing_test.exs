@@ -205,4 +205,47 @@ defmodule Hue.PairingTest do
       assert Agent.get(attempts, & &1) == 1
     end
   end
+
+  describe "telemetry" do
+    # Mirrors Hue.ResourceTest's "emits start and stop around a read": the
+    # ref proves the message came from this handler, but not which test's
+    # request produced it, since the span fires for every [:hue, :pairing]
+    # call anywhere in this async suite. Matching the expected content
+    # inside the receive pattern itself keeps the assertion specific to this
+    # call rather than any concurrently running one.
+    test "emits start and stop around pair/2", %{bridge: bridge} do
+      ref =
+        :telemetry_test.attach_event_handlers(self(), [
+          [:hue, :pairing, :start],
+          [:hue, :pairing, :stop]
+        ])
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        Req.Test.json(conn, [
+          %{"success" => %{"username" => "APP-KEY-40", "clientkey" => "CLIENT-KEY-32"}}
+        ])
+      end)
+
+      assert {:ok, _keys} = Pairing.pair(bridge, plug: {Req.Test, __MODULE__})
+
+      assert_received {[:hue, :pairing, :start], ^ref, %{monotonic_time: _},
+                       %{method: :post, path: "/api"}}
+
+      assert_received {[:hue, :pairing, :stop], ^ref, %{duration: _},
+                       %{method: :post, path: "/api", result: :ok}}
+    end
+
+    test "emits stop with result: :error on a bridge error", %{bridge: bridge} do
+      ref = :telemetry_test.attach_event_handlers(self(), [[:hue, :pairing, :stop]])
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        Plug.Conn.send_resp(conn, 200, Hue.Fixtures.raw("pairing_link_button_not_pressed.json"))
+      end)
+
+      Pairing.pair(bridge, plug: {Req.Test, __MODULE__})
+
+      assert_received {[:hue, :pairing, :stop], ^ref, _measurements,
+                       %{method: :post, path: "/api", result: :error}}
+    end
+  end
 end
