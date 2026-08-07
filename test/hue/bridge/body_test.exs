@@ -46,6 +46,24 @@ defmodule Hue.Bridge.BodyTest do
              Body.build([brightness: 40], plain_light())
   end
 
+  test "brightness accepts the boundary values 0 and 100" do
+    assert {:ok, %{"dimming" => %{"brightness" => lower}}} = Body.build([brightness: 0], light())
+    assert lower == 0.0
+
+    assert {:ok, %{"dimming" => %{"brightness" => upper}}} =
+             Body.build([brightness: 100], light())
+
+    assert upper == 100.0
+  end
+
+  test "a brightness above 100 raises rather than being sent as-is" do
+    assert_raise ArgumentError, ~r/brightness/, fn -> Body.build([brightness: 150], light()) end
+  end
+
+  test "a negative brightness raises rather than being sent as-is" do
+    assert_raise ArgumentError, ~r/brightness/, fn -> Body.build([brightness: -1], light()) end
+  end
+
   test "transition translates to dynamics duration" do
     assert {:ok, %{"dynamics" => %{"duration" => 400}}} = Body.build([transition: 400], light())
   end

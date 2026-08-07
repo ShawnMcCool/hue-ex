@@ -7,7 +7,15 @@ defmodule Hue.Bridge.Body do
 
   `brightness: "loud"` is a bug in the calling code. There is no runtime
   handling for it — only a source change — so it **raises**, at the call
-  site, with a message naming the option.
+  site, with a message naming the option. `brightness: 150` is the same kind
+  of bug: CLIP v2's `dimming.brightness` is a percentage, `0`-`100` inclusive,
+  and a value outside that range was never valid input, on any light,
+  regardless of what is plugged into the socket — so it **raises** too,
+  rather than being treated as a per-light capability question. This module
+  deliberately does **not** validate against a light's `min_dim_level`: that
+  is a physical floor that varies by bulb, and clamping a legal percentage up
+  to it is the bridge's job, not this library's — see `fragment/2`'s
+  `:brightness` clause.
 
   `color: "#ff8800"` sent to a white-only bulb is not a bug. It is a mismatch
   between what the code asked for and what is screwed into a lamp in the
@@ -71,7 +79,8 @@ defmodule Hue.Bridge.Body do
     raise ArgumentError, "on: expects a boolean, got: #{inspect(value)}"
   end
 
-  defp fragment({:brightness, value}, resource) when is_number(value) do
+  defp fragment({:brightness, value}, resource)
+       when is_number(value) and value >= 0 and value <= 100 do
     if Map.has_key?(resource, "dimming") do
       {:ok, %{"dimming" => %{"brightness" => value / 1}}}
     else
@@ -80,7 +89,8 @@ defmodule Hue.Bridge.Body do
   end
 
   defp fragment({:brightness, value}, _resource) do
-    raise ArgumentError, "brightness: expects a number, got: #{inspect(value)}"
+    raise ArgumentError,
+          "brightness: expects a number between 0 and 100 (a CLIP v2 percentage), got: #{inspect(value)}"
   end
 
   defp fragment({:transition, value}, _resource) when is_integer(value) and value >= 0 do
