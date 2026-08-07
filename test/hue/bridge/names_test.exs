@@ -92,10 +92,12 @@ defmodule Hue.Bridge.NamesTest do
     assert Enum.all?(named_lights, fn {name, rid} -> is_binary(name) and is_binary(rid) end)
   end
 
-  test "the real fixture names all six rooms and three zones" do
+  test "the real fixture names every room, zone, scene, and smart scene" do
     entries = Names.entries(Hue.Fixtures.full_state()["data"])
 
     assert Enum.count(entries, &match?({{:name, :room, _}, _}, &1)) == 6
     assert Enum.count(entries, &match?({{:name, :zone, _}, _}, &1)) == 3
+    assert Enum.count(entries, &match?({{:name, :scene, _}, _}, &1)) == 34
+    assert Enum.count(entries, &match?({{:name, :smart_scene, _}, _}, &1)) == 2
   end
 end
