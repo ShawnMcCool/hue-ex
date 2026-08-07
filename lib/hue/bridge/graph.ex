@@ -34,6 +34,26 @@ defmodule Hue.Bridge.Graph do
   fail with `:not_synced` or `:not_started` — those are not "no such rid" and
   must propagate unchanged rather than send this to the name index, which
   would only fail the same way a second time.
+
+  ## The exact match on `:not_found` is deliberate, and currently untestable
+
+  This matches `{:error, %Error{reason: :not_found}}` specifically, rather
+  than a catch-all `{:error, _}`, on purpose: a `:not_synced` or
+  `:not_started` result is a fact about the cache, not about the target, and
+  should be returned as-is instead of paying for a second lookup that asks
+  the same cache the same question a different way.
+
+  But today, `Cache.fetch/3` and `Cache.fetch_by_name/3` share the exact same
+  `readable/1` gate, so for `:not_synced` and `:not_started` both paths
+  produce the byte-identical error — falling through to `fetch_by_name`
+  unconditionally would be observably wrong only if the two functions' gating
+  ever diverged. No test in this suite can currently tell "propagated
+  directly" apart from "fell through and independently derived the same
+  answer" without instrumenting `Cache` with a call counter, which was judged
+  not worth building. **Do not simplify this to a catch-all on the strength
+  of the test suite staying green if you do** — the suite cannot see the
+  difference, but a future change to either function's gating could make it
+  observable again, silently.
   """
   @spec resolve(Cache.table(), atom(), String.t()) :: {:ok, map()} | {:error, Error.t()}
   def resolve(table, type, target) when is_binary(target) do

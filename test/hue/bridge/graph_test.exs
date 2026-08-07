@@ -4,6 +4,7 @@ defmodule Hue.Bridge.GraphTest do
   alias Hue.Bridge.Cache
   alias Hue.Bridge.Graph
   alias Hue.Error
+  alias Hue.Event
 
   setup context do
     table = Module.concat(Hue.GraphTest, context.test |> to_string() |> String.replace(" ", "_"))
@@ -86,6 +87,28 @@ defmodule Hue.Bridge.GraphTest do
 
     assert {:error, %Error{reason: :no_grouped_light, rid: "room-2"}} =
              Graph.grouped_light(table, :room, "Spare Room")
+  end
+
+  test "a room that arrives with no services list at all is :no_grouped_light", %{table: table} do
+    # A real shape the eventstream can produce: an :update event's data is
+    # whatever the delta carried, and for a rid the cache has never fully
+    # seen there is no prior cached copy for Merge.merge/2 to fill "services"
+    # in from — so the cached resource can end up with no "services" key at
+    # all, not merely an empty list. The fixture never produces this (every
+    # room and zone the bridge answers with carries "services", even when
+    # empty), which is why this clause has no coverage from the fixture test
+    # below and needs its own.
+    Cache.seed(table, [])
+
+    Cache.apply_event(table, %Event{
+      type: :update,
+      resource_type: :room,
+      rid: "room-3",
+      data: %{"type" => "room", "id" => "room-3", "metadata" => %{"name" => "Half-Built Room"}}
+    })
+
+    assert {:error, %Error{reason: :no_grouped_light, rid: "room-3"}} =
+             Graph.grouped_light(table, :room, "room-3")
   end
 
   test "a room whose grouped_light service is not in the cache is :not_found", %{table: table} do
