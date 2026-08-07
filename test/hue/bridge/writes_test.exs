@@ -129,11 +129,20 @@ defmodule Hue.Bridge.WritesTest do
   end
 
   test "an unknown type falls back to the light interval" do
+    {writes, 0} = Writes.new() |> Writes.enqueue({:button, "button-1"}, %{"foo" => "bar"})
+    {:ok, _key, _body, writes} = Writes.take(writes, :button, 1_000)
+    {writes, 0} = Writes.enqueue(writes, {:button, "button-2"}, %{"foo" => "bar"})
+
+    assert Writes.due_in(writes, :button, 1_000) == 100
+  end
+
+  test "a scene recall is paced at the grouped_light rate, not the light rate" do
     {writes, 0} = Writes.new() |> Writes.enqueue({:scene, "scene-1"}, %{"recall" => %{}})
     {:ok, _key, _body, writes} = Writes.take(writes, :scene, 1_000)
     {writes, 0} = Writes.enqueue(writes, {:scene, "scene-2"}, %{"recall" => %{}})
 
-    assert Writes.due_in(writes, :scene, 1_000) == 100
+    assert Writes.due_in(writes, :scene, 1_000) == 1_000
+    assert Writes.due_in(writes, :scene, 1_999) == 1
   end
 
   test "the pending types are reportable" do

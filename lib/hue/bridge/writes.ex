@@ -22,6 +22,11 @@ defmodule Hue.Bridge.Writes do
   pending item: three lights queued at once go out over 300 ms, and a queued
   grouped_light does not delay them.
 
+  A scene recall is paced at the grouped_light rate rather than the light
+  rate, even though it is one HTTP request like a light write. Hue does not
+  document a scene-recall limit, so this is inferred rather than cited — see
+  the comment on `@scene_interval`.
+
   ## No clock
 
   Every function that cares about time takes `now` as a monotonic millisecond
@@ -35,7 +40,23 @@ defmodule Hue.Bridge.Writes do
   @light_interval 100
   @grouped_light_interval 1_000
 
-  @intervals %{light: @light_interval, grouped_light: @grouped_light_interval}
+  # Neither Hue's documentation nor this library's spec states a scene-recall
+  # limit — this is a judgement, not a citation. It is paced like a
+  # grouped_light rather than like a light because what matters is what a
+  # write does downstream, not how many HTTP requests it took to say it. A
+  # scene recall is one request, but so is a grouped_light write, and Hue
+  # paces that at a tenth of a light's rate because of the fan-out behind it:
+  # every light in a room or a zone changing at once. A scene recall fans out
+  # the same way, often across a whole room or the whole home. Pacing it like
+  # a single light because it happens to be one request would be reasoning
+  # about the wrong thing.
+  @scene_interval @grouped_light_interval
+
+  @intervals %{
+    light: @light_interval,
+    grouped_light: @grouped_light_interval,
+    scene: @scene_interval
+  }
 
   @type key :: {atom(), String.t()}
 
