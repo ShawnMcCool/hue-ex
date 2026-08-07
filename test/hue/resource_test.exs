@@ -236,7 +236,8 @@ defmodule Hue.ResourceTest do
       assert_received {[:hue, :request, :start], ^ref, %{monotonic_time: _},
                        %{method: :get, path: "/resource/light"}}
 
-      assert_received {[:hue, :request, :stop], ^ref, %{duration: _}, %{result: :ok}}
+      assert_received {[:hue, :request, :stop], ^ref, %{duration: _},
+                       %{method: :get, path: "/resource/light", result: :ok}}
     end
 
     # This is the bug the plan flagged: :telemetry.span/3 requires its
@@ -244,6 +245,11 @@ defmodule Hue.ResourceTest do
     # `elem(result, 0)` raises ArgumentError the moment `result` is the bare
     # atom `:ok` -- exactly what update/5 and delete/4 return in :simple
     # mode. Proves the fix (pattern-matched outcome/1) holds for that shape.
+    #
+    # The rid is this test's own, used nowhere else in the suite: "abc" (the
+    # original choice) is also the rid three other tests in this file PUT to
+    # the same path with the same :ok outcome, and a stop event only matched
+    # on `%{result: :ok}` cannot tell this test's own event apart from theirs.
     test "emits stop with result: :ok when the call itself returns bare :ok", %{client: client} do
       ref = :telemetry_test.attach_event_handlers(self(), [[:hue, :request, :stop]])
 
@@ -251,11 +257,17 @@ defmodule Hue.ResourceTest do
         Req.Test.json(conn, %{"errors" => [], "data" => [%{"rid" => "x", "rtype" => "light"}]})
       end)
 
-      assert :ok = Resource.update(client, :light, "abc", %{"on" => %{"on" => true}})
+      assert :ok = Resource.update(client, :light, "returns-bare-ok", %{"on" => %{"on" => true}})
 
-      assert_received {[:hue, :request, :stop], ^ref, _measurements, %{result: :ok}}
+      assert_received {[:hue, :request, :stop], ^ref, _measurements,
+                       %{method: :put, path: "/resource/light/returns-bare-ok", result: :ok}}
     end
 
+    # "missing" is this test's own rid; the sibling test below (empty data,
+    # not a wire-level 404) uses a different one, "unregistered-rid" -- both
+    # produce result: :error, so without a path to tell them apart, either
+    # one's event could satisfy the other's assert_received and the test that
+    # actually regressed would still pass.
     test "emits stop with result: :error on a bridge error", %{client: client} do
       ref = :telemetry_test.attach_event_handlers(self(), [[:hue, :request, :stop]])
 
@@ -263,12 +275,14 @@ defmodule Hue.ResourceTest do
 
       Resource.get(client, :light, "missing")
 
-      assert_received {[:hue, :request, :stop], ^ref, _measurements, %{result: :error}}
+      assert_received {[:hue, :request, :stop], ^ref, _measurements,
+                       %{method: :get, path: "/resource/light/missing", result: :error}}
     end
 
     # Telemetry wraps the whole public call, so a domain-level reinterpretation
     # -- get/4 turning an empty data array into :not_found -- shows up as
-    # :error here too, not just a wire-level 200.
+    # :error here too, not just a wire-level 200. See the sibling test above
+    # for why this uses its own distinct rid rather than "missing" too.
     test "emits stop with result: :error when get/4 collapses to :not_found", %{client: client} do
       ref = :telemetry_test.attach_event_handlers(self(), [[:hue, :request, :stop]])
 
@@ -276,9 +290,10 @@ defmodule Hue.ResourceTest do
         Req.Test.json(conn, %{"errors" => [], "data" => []})
       end)
 
-      Resource.get(client, :light, "missing")
+      Resource.get(client, :light, "unregistered-rid")
 
-      assert_received {[:hue, :request, :stop], ^ref, _measurements, %{result: :error}}
+      assert_received {[:hue, :request, :stop], ^ref, _measurements,
+                       %{method: :get, path: "/resource/light/unregistered-rid", result: :error}}
     end
   end
 
