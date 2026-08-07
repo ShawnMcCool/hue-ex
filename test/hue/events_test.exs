@@ -148,13 +148,18 @@ defmodule Hue.EventsTest do
     test "an empty data array yields no events, quietly" do
       log = capture_log(fn -> assert Events.decode(envelope("update", [])) == [] end)
 
-      assert log == ""
+      # Not `== ""`: async: true means a concurrently-running test's unrelated
+      # warning can land in this capture too (ExUnit.CaptureLog broadcasts every
+      # log event to every currently-active capture, VM-wide, with no per-process
+      # attribution — see ExUnit.CaptureServer.log/2). Scope the refutation to
+      # what this module itself would log, not to total silence.
+      refute log =~ "Hue.Events:"
     end
 
     test "an envelope list that is empty yields no events, quietly" do
       log = capture_log(fn -> assert Events.decode(frame("[]")) == [] end)
 
-      assert log == ""
+      refute log =~ "Hue.Events:"
     end
 
     # A frame that vanishes without trace is the hardest eventstream bug to find.
