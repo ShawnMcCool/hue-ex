@@ -202,6 +202,7 @@ most useful thing to monitor about this library.
 
 ```
 [:hue, :request, :start | :stop | :exception]   duration, type, rid, status
+[:hue, :pairing, :start | :stop | :exception]   duration, method, path, result
 [:hue, :sync, :stop]                            duration, resource_count
 [:hue, :stream, :connected]                     downtime
 [:hue, :stream, :disconnected]                  reason
@@ -209,10 +210,11 @@ most useful thing to monitor about this library.
 [:hue, :write, :failed]                         reason
 ```
 
-`[:hue, :request, *]` (layer 1, via `:telemetry.span/3`) fires around every
-`Hue.Resource` call. Everything else is layer 2, emitted by the `Hue.Bridge`
-process for whichever bridge it concerns (`metadata.bridge` is the name you
-gave `Hue.Bridge`'s `:name` option).
+`[:hue, :request, *]` and `[:hue, :pairing, *]` (layer 1, via
+`:telemetry.span/3`) fire around every `Hue.Resource` call and every
+`Hue.Pairing.pair/2` call, respectively. Everything else is layer 2, emitted
+by the `Hue.Bridge` process for whichever bridge it concerns
+(`metadata.bridge` is the name you gave `Hue.Bridge`'s `:name` option).
 
 `[:hue, :stream, :disconnected]` is the one worth attaching to unconditionally.
 This library's characteristic failure mode is silent: a dropped eventstream

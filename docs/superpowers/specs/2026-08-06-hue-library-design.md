@@ -525,6 +525,7 @@ discarding either.
 
 ```
 [:hue, :request, :start | :stop | :exception]     duration, type, rid, status
+[:hue, :pairing, :start | :stop | :exception]     duration, method, path, result
 [:hue, :stream, :connected | :disconnected]       reason, downtime
 [:hue, :sync, :stop]                              resource_count, duration
 [:hue, :write, :coalesced]                        collapsed_count
@@ -539,6 +540,17 @@ discarding either.
 > already returned `:ok` to a caller who is long gone; telemetry and an
 > `error` event to subscribers are the only two ways the failure can surface
 > at all.
+>
+> **Corrected again, during layer 2.** `[:hue, :pairing]` was also missing,
+> despite `Hue.Pairing.pair/2` wrapping its request in `:telemetry.span/3`
+> since it was written. Start metadata carries `:method` and `:path`; stop
+> metadata adds `:result` (`:ok` or `:error`) — the same shape as
+> `[:hue, :request]`, since `Hue.Pairing` mirrors `Hue.Resource`'s span here
+> even though it cannot reuse the code (pairing speaks the legacy v1 API, not
+> CLIP v2). The application key and clientkey a successful pairing returns
+> are deliberately never included in either event's metadata: an application
+> key is exactly as sensitive as a password, and telemetry handlers are
+> commonly attached loggers.
 
 `[:hue, :stream, :disconnected]` is the important one. The characteristic failure
 of this library is silence: a dead stream means every read is quietly stale, and
