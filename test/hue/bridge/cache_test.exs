@@ -124,6 +124,11 @@ defmodule Hue.Bridge.CacheTest do
     assert cached["dimming"] == %{"brightness" => 42.0, "min_dim_level" => 0.2}
   end
 
+  # `add` and `update` share one clause in Cache.apply_event/2 deliberately:
+  # both mean "this is what the resource looks like now," and an update for a
+  # rid the cache has never seen (e.g. a resource created before this bridge
+  # finished its first sync) must insert exactly like an explicit add. Keep
+  # both tests below — they pin that unification, not two copies of one fact.
   test "an update for a rid the cache has never seen inserts it", %{table: table} do
     Cache.seed(table, [])
 
@@ -148,6 +153,20 @@ defmodule Hue.Bridge.CacheTest do
     })
 
     assert {:ok, %{"id" => "light-3"}} = Cache.fetch(table, :light, "light-3")
+  end
+
+  test "an event with an unrecognised envelope type is a no-op", %{table: table} do
+    Cache.seed(table, [light("light-1")])
+
+    Cache.apply_event(table, %Event{
+      type: "some_future_envelope_type",
+      resource_type: :light,
+      rid: "light-1",
+      data: %{"type" => "light", "id" => "light-1", "on" => %{"on" => true}}
+    })
+
+    assert {:ok, cached} = Cache.fetch(table, :light, "light-1")
+    assert cached["on"] == %{"on" => false}
   end
 
   test "a delete event removes", %{table: table} do

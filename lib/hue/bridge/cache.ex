@@ -49,13 +49,11 @@ defmodule Hue.Bridge.Cache do
   of everything else — is already in the table, so the deletion is the only
   observable change and it is exactly the one the new state calls for.
 
-  `@seeded_key` and `@status_key` are never candidates for either prune step —
-  the match specs that find keys to delete can only match resource keys
-  (`{type, rid}`) or index keys (`{:name, type, name}` / `{:rid_name, type,
-  rid}`), the same structural guarantee documented under "Key shapes" below.
-  No function in this module ever deletes `@seeded_key` or `@status_key` once
-  set; `put_status/2` overwrites `@status_key` in place, and nothing removes
-  it first.
+  `@seeded_key` and `@status_key` are never candidates for either prune step,
+  for the structural reason "Key shapes" below already establishes: the match
+  specs that find keys to delete cannot match a bare atom. No function in this
+  module ever deletes `@seeded_key` or `@status_key` once set; `put_status/2`
+  overwrites `@status_key` in place.
 
   ## Key shapes
 
@@ -105,7 +103,7 @@ defmodule Hue.Bridge.Cache do
     keys = MapSet.new(entries, &elem(&1, 0))
 
     :ets.insert(table, entries)
-    prune_resources(table, keys)
+    prune(table, resource_keys(table), keys)
 
     reindex(table)
 
@@ -167,12 +165,12 @@ defmodule Hue.Bridge.Cache do
   """
   @spec status(table()) :: status() | :not_started
   def status(table) do
-    case :ets.lookup(table, @status_key) do
-      [{@status_key, status}] -> status
-      [] -> :not_started
+    with true <- exists?(table),
+         [{@status_key, status}] <- :ets.lookup(table, @status_key) do
+      status
+    else
+      _ -> :not_started
     end
-  rescue
-    ArgumentError -> :not_started
   end
 
   @doc "Fetches one resource by rid."
@@ -200,21 +198,22 @@ defmodule Hue.Bridge.Cache do
     end
   end
 
-  @doc """
-  The name a rid is known by, or `nil`.
-
-  Used by event dispatch to answer name-filtered subscriptions without
-  re-walking the device graph per event. Returns a bare value rather than a
-  result tuple because dispatch has nothing useful to do with an error.
-  """
+  @doc false
+  # The name a rid is known by, or `nil`. An internal seam for event dispatch
+  # (Task 9) to answer name-filtered subscriptions without re-walking the
+  # device graph per event — not part of the public `Hue.Light` / `Hue.Room`
+  # surface. Deliberately not a result tuple like `fetch/3` and
+  # `fetch_by_name/3`: dispatch has nothing useful to do with an error, so a
+  # bare value is the honest shape for its one caller, and `@doc false` says
+  # so rather than leaving the inconsistency for someone else to imitate.
   @spec name_of(table(), atom(), String.t()) :: String.t() | nil
   def name_of(table, type, rid) do
-    case :ets.lookup(table, {:rid_name, type, rid}) do
-      [{_key, name}] -> name
-      [] -> nil
+    with true <- exists?(table),
+         [{_key, name}] <- :ets.lookup(table, {:rid_name, type, rid}) do
+      name
+    else
+      _ -> nil
     end
-  rescue
-    ArgumentError -> nil
   end
 
   @doc "Every resource of one type."
@@ -226,13 +225,19 @@ defmodule Hue.Bridge.Cache do
   end
 
   defp readable(table) do
-    case :ets.lookup(table, @seeded_key) do
-      [{@seeded_key, true}] -> :ok
+    with true <- exists?(table),
+         [{@seeded_key, true}] <- :ets.lookup(table, @seeded_key) do
+      :ok
+    else
+      false -> {:error, %Error{reason: :not_started}}
       [] -> {:error, %Error{reason: :not_synced}}
     end
-  rescue
-    ArgumentError -> {:error, %Error{reason: :not_started}}
   end
+
+  # `:ets.whereis/1` answers "does this named table exist" directly, with no
+  # exception involved — a caller asking about a bridge that was never
+  # started is an ordinary, expected case, not an exceptional one.
+  defp exists?(table), do: :ets.whereis(table) != :undefined
 
   defp reindexing?(data), do: Map.has_key?(data, "metadata") or Map.has_key?(data, "services")
 
@@ -245,22 +250,14 @@ defmodule Hue.Bridge.Cache do
     keys = MapSet.new(entries, &elem(&1, 0))
 
     :ets.insert(table, entries)
-    prune_index(table, keys)
+    prune(table, index_keys(table), keys)
 
     :ok
   end
 
-  defp prune_resources(table, keys) do
-    table
-    |> resource_keys()
-    |> Enum.reject(&MapSet.member?(keys, &1))
-    |> Enum.each(&:ets.delete(table, &1))
-  end
-
-  defp prune_index(table, keys) do
-    table
-    |> index_keys()
-    |> Enum.reject(&MapSet.member?(keys, &1))
+  defp prune(table, candidate_keys, keys_to_keep) do
+    candidate_keys
+    |> Enum.reject(&MapSet.member?(keys_to_keep, &1))
     |> Enum.each(&:ets.delete(table, &1))
   end
 
