@@ -3,6 +3,8 @@ defmodule Hue.Bridge.MergeTest do
 
   alias Hue.Bridge.Merge
 
+  doctest Hue.Bridge.Merge
+
   test "a nested map merges rather than replacing its siblings" do
     cached = %{
       "dimming" => %{"brightness" => 42.0, "min_dim_level" => 0.2},
@@ -55,5 +57,19 @@ defmodule Hue.Bridge.MergeTest do
   test "a scalar replacing a map takes the scalar" do
     assert Merge.merge(%{"color" => %{"xy" => %{"x" => 0.3}}}, %{"color" => nil}) ==
              %{"color" => nil}
+  end
+
+  test "a struct is replaced whole rather than merged into" do
+    cached = %{"detail" => %{"reason" => :not_found, "rid" => "light-1"}}
+    delta = %{"detail" => %Hue.Error{reason: :timeout}}
+
+    assert Merge.merge(cached, delta) == %{"detail" => %Hue.Error{reason: :timeout}}
+  end
+
+  test "merging two different struct types replaces rather than producing a hybrid" do
+    cached = %{"e" => %Hue.Error{reason: :not_found, rid: "a"}}
+    delta = %{"e" => %Hue.Event{type: :update, rid: "z"}}
+
+    assert Merge.merge(cached, delta) == %{"e" => %Hue.Event{type: :update, rid: "z"}}
   end
 end
