@@ -4311,7 +4311,17 @@ The three `refute_receive` assertions are the ones that prove "caught before the
 ```
 
 Run: `cd ~/src/hue-ex && mix test test/hue/light_test.exs`
-Expected: FAIL on all three "refused before any request" / "sends nothing" tests. Restore and confirm PASS.
+Expected: FAIL on the **two** capability tests — "brightness on a light with no dimming is refused before any request" and "colour on a light with no colour is refused before any request".
+
+> **Corrected after implementation.** This step originally predicted all *three*
+> "refused / sends nothing" tests would fail, including "set/3 on an unknown
+> target is :not_found and sends nothing". That one does **not** fail, and cannot:
+> it is protected by name *resolution* failing in the `with`'s first clause, which
+> this breakage does not touch — it only moves the capability check, the second
+> clause, after the write. The prose conflated two different protections under one
+> description. Two tests, not three.
+
+Restore and confirm PASS.
 
 - [ ] **Step 6: Commit**
 
@@ -4953,7 +4963,7 @@ The live suite is read-and-restore: it may change state, but it must put it back
 - Modify: `mix.exs` (version)
 - Modify: `docs/superpowers/specs/2026-08-06-hue-library-design.md` (record what implementation changed)
 
-- [ ] **Step 1: Add the live layer-2 suite**
+- [x] **Step 1: Add the live layer-2 suite**
 
 Append to `test/live/live_test.exs`, following the existing `@tag :live` style:
 
@@ -5115,7 +5125,7 @@ Expected: PASS.
 
 Record whatever is found in the spec, in the same "Discovered during implementation" style layer 1 used for TLS resumption.
 
-- [ ] **Step 4: Write the README's layer-2 section**
+- [x] **Step 4: Write the README's layer-2 section**
 
 Add after the existing layer-1 quickstart:
 
@@ -5185,7 +5195,7 @@ Attach to `[:hue, :stream, :disconnected]` if you want to know. It is the single
 most useful thing to monitor about this library.
 ````
 
-- [ ] **Step 5: Document the telemetry events**
+- [x] **Step 5: Document the telemetry events**
 
 Add a `## Telemetry` section to the README listing all of them, layer 1 and 2 together:
 
@@ -5198,18 +5208,18 @@ Add a `## Telemetry` section to the README listing all of them, layer 1 and 2 to
 [:hue, :write, :failed]                         reason
 ```
 
-- [ ] **Step 6: Bump the version**
+- [x] **Step 6: Bump the version**
 
 In `mix.exs`, `@version "0.2.0"`. A minor bump: layer 2 is entirely additive, and layer 1's only changes (`Hue.Resource.list_all/2`, `Hue.Resource.type/1`, two new error reasons) are additions too.
 
-- [ ] **Step 7: Run precommit**
+- [x] **Step 7: Run precommit**
 
 Run: `cd ~/src/hue-ex && mix precommit`
 Expected: PASS — `compile --warnings-as-errors`, `deps.unlock --unused`, `format`, `credo --strict`, `dialyzer`, `test`.
 
 Dialyzer is the one likely to complain, most often about `Hue.Bridge.status/1`'s union including `:not_started` where the `Cache.status/0` type does not. Widen the type rather than adding a `no_return` exemption.
 
-- [ ] **Step 8: Update the spec with what implementation found**
+- [x] **Step 8: Update the spec with what implementation found**
 
 The spec is the record of the design, and layer 1's most valuable sections are the ones written *after* the code disagreed with the plan. Add a "Discovered during implementation (layer 2)" subsection to `### Hue.Bridge internals` covering anything the live run in Step 3 turned up, plus the ordering decision this plan settled:
 

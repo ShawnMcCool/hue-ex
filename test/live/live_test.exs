@@ -251,4 +251,137 @@ defmodule Hue.LiveTest do
       assert Gamut.contains?(Gamut.from_light(light), xy)
     end
   end
+
+  # -- layer 2 -----------------------------------------------------------
+  #
+  # Everything above this point is read-only by construction (see the
+  # moduledoc): it never calls Hue.Resource.update/5, so there is nothing to
+  # restore. Layer 2 cannot make that same promise -- a live model exists to
+  # be written to -- so every describe block below is read-and-restore
+  # instead: it may change real state (a light's on/off, a light's
+  # brightness), but on_exit/1 always puts it back before the test process
+  # is torn down, win or lose.
+  describe "layer 2 against real hardware" do
+    @describetag :live
+
+    # setup_all above already built :client from HUE_HOST/HUE_KEY -- reused
+    # here rather than re-running Hue.Discovery.identify/2 and
+    # Hue.from_bridge/2 a second time for the same bridge.
+    setup %{client: client} do
+      name = Hue.LiveTest.Bridge
+
+      start_supervised!({Hue.Bridge, name: name, client: client})
+
+      assert eventually(fn -> Hue.Bridge.status(name) == :live end, 15_000),
+             "bridge never synced; status was #{inspect(Hue.Bridge.status(name))}"
+
+      {:ok, bridge: name}
+    end
+
+    test "the cache holds the same resource counts the fixture recorded", %{bridge: bridge} do
+      {:ok, lights} = Hue.Light.list(bridge)
+      {:ok, rooms} = Hue.Room.list(bridge)
+      {:ok, zones} = Hue.Zone.list(bridge)
+
+      # Counts, not identities: rids recorded on 2026-08-06 no longer exist
+      # -- see the fixture-drift comments earlier in this file.
+      assert length(lights) == 19
+      assert length(rooms) == 6
+      assert length(zones) == 3
+    end
+
+    test "every light resolves by the name of the device that owns it", %{bridge: bridge} do
+      {:ok, lights} = Hue.Light.list(bridge)
+
+      for light <- lights do
+        name = Hue.Bridge.name_of(bridge, :light, light["id"])
+        assert is_binary(name), "light #{light["id"]} has no name from its owning device"
+        assert {:ok, %{"id" => rid}} = Hue.Light.get(bridge, name)
+        assert rid == light["id"]
+      end
+    end
+
+    test "two rooms really do have no grouped_light", %{bridge: bridge} do
+      {:ok, rooms} = Hue.Room.list(bridge)
+
+      empty =
+        Enum.count(rooms, fn room ->
+          match?(
+            {:error, %Hue.Error{reason: :no_grouped_light}},
+            Hue.Room.set(bridge, room["id"], on: true)
+          )
+        end)
+
+      assert empty == 2
+    end
+
+    test "the two non-dimmable lights are refused before the request leaves", %{bridge: bridge} do
+      {:ok, lights} = Hue.Light.list(bridge)
+      undimmable = Enum.reject(lights, &Map.has_key?(&1, "dimming"))
+
+      assert length(undimmable) == 2
+
+      for light <- undimmable do
+        assert {:error, %Hue.Error{reason: :not_dimmable}} =
+                 Hue.Light.set(bridge, light["id"], brightness: 50)
+      end
+    end
+
+    @tag timeout: 30_000
+    test "a real write produces a real event", %{bridge: bridge} do
+      {:ok, lights} = Hue.Light.list(bridge)
+      light = Enum.find(lights, &Map.has_key?(&1, "dimming"))
+      original = light["on"]["on"]
+
+      :ok = Hue.Bridge.subscribe(bridge, rid: light["id"])
+
+      on_exit(fn -> Hue.Light.set(bridge, light["id"], on: original) end)
+
+      :ok = Hue.Light.set(bridge, light["id"], on: !original)
+
+      assert_receive {:hue, %Hue.Event{rid: _rid}}, 10_000
+
+      # The cache must reflect it without anyone asking the bridge again.
+      assert eventually(fn ->
+               {:ok, cached} = Hue.Light.get(bridge, light["id"])
+               cached["on"]["on"] == !original
+             end)
+    end
+
+    @tag timeout: 30_000
+    test "twenty rapid writes do not produce twenty requests", %{bridge: bridge} do
+      {:ok, lights} = Hue.Light.list(bridge)
+      light = Enum.find(lights, &Map.has_key?(&1, "dimming"))
+      original = light["dimming"]["brightness"]
+
+      on_exit(fn -> Hue.Light.set(bridge, light["id"], brightness: original) end)
+
+      for brightness <- 30..49 do
+        Hue.Light.set(bridge, light["id"], brightness: brightness / 1)
+      end
+
+      # A bridge that received twenty writes in a burst would answer some with
+      # 429. Reaching the last value without one is the observable property.
+      assert eventually(
+               fn ->
+                 {:ok, cached} = Hue.Light.get(bridge, light["id"])
+                 round(cached["dimming"]["brightness"]) == 49
+               end,
+               10_000
+             )
+    end
+  end
+
+  defp eventually(check, timeout \\ 5_000) do
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_eventually(check, deadline)
+  end
+
+  defp do_eventually(check, deadline) do
+    cond do
+      check.() -> true
+      System.monotonic_time(:millisecond) > deadline -> false
+      true -> Process.sleep(100) && do_eventually(check, deadline)
+    end
+  end
 end

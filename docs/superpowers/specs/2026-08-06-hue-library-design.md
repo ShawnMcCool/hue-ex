@@ -180,9 +180,25 @@ Hue.Error           reason atoms across all three wire formats
 Hue.Color           hex/RGB/Kelvin → gamut-clamped xy
 
 ── Layer 2: live model ────────────────────────────────────────
-Hue.Bridge          GenServer + ETS; child_spec for your tree
+Hue.Bridge          Supervisor; child_spec for your tree
+  ├─ Registry             subscription filtering (type/name/rid)
+  ├─ Task.Supervisor      stream + write tasks, off the server's stack
+  └─ Hue.Bridge.Server    the GenServer: sync, reconnect, dispatch, writes
+       ├─ Hue.Bridge.Cache    the named ETS table; every read path
+       ├─ Hue.Bridge.Graph    name-or-rid → resource; room/zone → grouped_light
+       ├─ Hue.Bridge.Body     write options → CLIP v2 body, capability-checked
+       ├─ Hue.Bridge.Writes   coalescing, per-type-paced write queue
+       └─ Hue.Bridge.Merge    deep-merge of an event delta into a cached resource
+  (Hue.Bridge.Names builds the two name indexes Cache keeps; pure, no process)
 Hue.Light  Hue.Room  Hue.Zone  Hue.Scene    name-addressable operations
 ```
+
+> **Corrected after implementation.** This diagram originally listed
+> `Hue.Bridge` alone for layer 2, as a single GenServer + ETS. The built shape
+> is a `Supervisor` (`Hue.Bridge`) over a `Registry`, a `Task.Supervisor`, and
+> one `Hue.Bridge.Server` GenServer, with `Cache`, `Graph`, `Body`, `Writes`,
+> `Merge`, and `Names` beneath it — see "`Hue.Bridge` internals" below for why
+> each of those is its own module rather than code inside the server.
 
 Layer 1 starts no processes and holds no state between calls. Layer 2 never
 starts itself — it hands you a `child_spec` and you place it in your own
@@ -239,9 +255,18 @@ at a moment the user chose.
 
 A changed fingerprint is not silently accepted. It means either a factory-reset
 bridge or an interception attempt, and the two are indistinguishable from here,
-so it surfaces as an error the consumer must resolve by explicitly re-trusting —
-`Hue.Client.trust_new_certificate/1`. `verify: :none` remains available for
-people who want `aiohue`'s behaviour, and is never the default.
+so it surfaces as an error the consumer must resolve by explicitly re-trusting.
+`verify: :none` remains available for people who want `aiohue`'s behaviour, and
+is never the default.
+
+> **Corrected after implementation.** This referenced
+> `Hue.Client.trust_new_certificate/1`, which was never built — there is no
+> separate re-trust function. Re-trusting a bridge is re-running
+> `Hue.Discovery.identify/2`: it repeats the same first-contact capture this
+> section already describes, records whatever fingerprint the bridge presents
+> this time, and the caller persists it, knowingly, exactly as they did on
+> first pairing. A dedicated function would have to do the same thing under a
+> different name.
 
 **Discovered during implementation: TLS session resumption silently bypasses the
 pin.** Installing a `verify_fun` is necessary but not sufficient. Once one
@@ -326,6 +351,86 @@ subscriptions clean themselves up. Filtering happens at the registry: a consumer
 waiting on button presses must not wake for all 19 lights when a scene runs.
 
 Multiple bridges are multiple named children; no special casing.
+
+#### Discovered during implementation (layer 2)
+
+**Connect ordering.** The stream is opened before the full fetch, and its
+events are buffered rather than applied until the seed completes, then
+replayed on top of it. Fetching first would lose every change that happens in
+the gap between the fetch and the stream opening — the state those events
+modify would already be in the cache, with no path left to update it.
+Buffer-then-replay narrows that window without closing it:
+`Hue.Events.stream/2` connects lazily, on first enumeration, so there is a
+moment between "the connect task started" and "the socket is actually open"
+that the server cannot observe from the outside. That moment is smaller than
+the fetch it replaces — request headers versus 154 KB of response — and
+narrowing it costs nothing, but it is a narrowing, not a guarantee.
+
+**Insert before pruning a reseed.** The cache's `seed/2` was first written to
+clear the table and reinsert, restoring the lifecycle rows (`:__seeded__`,
+`:__status__`) afterwards. That is wrong for a **reconnecting** bridge — not
+the first sync, a later reseed after a stream drop — because reads happen in
+other processes, concurrently with the server's own writes. A reader could
+land in the gap between "table cleared" and "table refilled" and see
+`status/1` answer `:not_started` and every read `:not_synced`, for a bridge
+that had synced an hour ago and was merely refreshing its state. "Stale beats
+refusing to answer" became, for that instant, "refuse to answer." The fix
+generalises across the module: insert the new rows first, then prune whatever
+the new state does not contain — never the reverse — which is also why
+`@seeded_key` is written last rather than restored: there is nothing to
+restore if it was never removed.
+
+**Backoff must not reset on a successful fetch alone.** A bridge whose fetch
+works every cycle but whose eventstream is refused (`eventstream_status: 403`
+on the stub; a bridge with a working `/clip/v2/resource` but a broken
+`/eventstream/clip/v2` in practice) would otherwise reconnect every ~20ms
+forever: `seed/3` runs to completion, including a successful fetch, before the
+server can process any message from the stream task it just spawned —
+including that task immediately crashing — so a version that reset the
+backoff on every successful seed reset it every single cycle, whether or not
+the stream that just failed had ever been live. The fix is a `live_since`
+guard: backoff only resets to its base value if the stream that just
+disconnected had been up for at least one full `reconnect_after` interval,
+which is the only evidence available that the failure is a fresh problem
+rather than the same one repeating.
+
+**`subscribe/2` had to be made idempotent by hand.** The subscription registry
+is `:duplicate` (deliberately — one process can hold several distinct
+subscriptions, one per filter), and a `:duplicate` registry's `register/3`
+never returns `{:error, {:already_registered, pid}}` — every call succeeds and
+adds its own entry, even for a key the calling process already holds. Nothing
+in `Registry` itself makes calling `subscribe/2` twice with the same filter a
+no-op; without an explicit check, a `mount/3` that runs twice (LiveView's
+usual case) silently doubles delivery, permanently, with no error to notice it
+by. `Hue.Bridge.subscribe/2` checks the registry's own entry list for the
+calling pid under that key before registering.
+
+**Partial write success was silently treated as success**, until the write
+path started asking `Hue.Resource.update/5` for `return: :detailed`. CLIP v2
+can answer a `PUT` with HTTP 200, a non-empty `data`, **and** a non-empty
+`errors` — the bridge accepted part of the write and rejected the rest.
+`Resource.interpret/2`'s default `:simple` mode was built for a caller who is
+still there to inspect the result and matches on `%{"data" => data}` alone,
+discarding `errors`; a write server has no caller left by the time the
+response arrives; `[:hue, :write, :failed]` and the `error` event it produces
+are the only two ways a rejection can surface, so silently discarding the
+`errors` list that is the only evidence of one silently turned "the bridge
+refused half of what you asked for" into "the write succeeded."
+
+**`Req.Plug` batches chunks.** Req's test adapter runs a function plug to
+completion and only converts the accumulated `Plug.Conn.chunk/2` calls into
+delivered frames once the plug function *returns* — a frame sent on a
+connection the stub is holding open is not observed by the client until the
+connection closes (measured: a frame sent alone was still unobserved 1.5
+seconds later). `Hue.Stub`'s eventstream therefore cannot be scripted as
+"push one frame, assert, push another, assert" the way a real reconnect test
+would want. The tests are written to the protocol's real shape instead — one
+frame carries many envelopes, and each envelope carries many resource deltas,
+which is what the reference bridge actually sends — so a test needing three
+distinguishable events sends one frame containing three envelopes, and the
+handful of tests that genuinely need separate deliveries close the connection
+between them rather than relying on two frames staying apart on one open
+connection.
 
 ### The write path
 
@@ -423,7 +528,17 @@ discarding either.
 [:hue, :stream, :connected | :disconnected]       reason, downtime
 [:hue, :sync, :stop]                              resource_count, duration
 [:hue, :write, :coalesced]                        collapsed_count
+[:hue, :write, :failed]                           reason
 ```
+
+> **Corrected after implementation.** `[:hue, :write, :failed]` was missing
+> from this list despite being emitted (`Hue.Bridge.Server`'s
+> `report_write_failure/3`), tested, and described in "The write path" above
+> — the prose already promised it. It fires whenever a queued write's PUT
+> fails outright or comes back partly rejected, since by then `write/4` has
+> already returned `:ok` to a caller who is long gone; telemetry and an
+> `error` event to subscribers are the only two ways the failure can surface
+> at all.
 
 `[:hue, :stream, :disconnected]` is the important one. The characteristic failure
 of this library is silence: a dead stream means every read is quietly stale, and
