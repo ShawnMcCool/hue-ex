@@ -1587,6 +1587,11 @@ defmodule Hue.Stub do
     {:ok, client} =
       Hue.new("192.0.2.10",
         application_key: "k",
+        # Req retries a 503 by default (:safe_transient), which reruns the
+        # plug -- and so decrements remaining_failures below -- more than
+        # once per call the test makes. See "Corrected after implementation"
+        # below.
+        retry: false,
         plug: fn conn ->
           route(conn, %{
             test: test,
@@ -1683,12 +1688,63 @@ defmodule Hue.Stub do
 end
 ```
 
+> **Corrected after implementation.** The `plug:` above originally had no `retry:`
+> option. Req retries a 503 by default (`:safe_transient`), which runs the plug —
+> and so `failing?/2`'s `:counters.sub/3` — again from inside the same
+> `Resource.list_all/1` call, before the test gets a turn. `fetch_failures: 2`
+> then collapsed two intended failures into one call that returned `{:ok, _}`
+> already, because Req's own retry had already consumed both. `retry: false` is
+> the fix: it is what makes one call to the stub mean exactly one run of the
+> plug, which is what every other part of this module's contract — the
+> `{:hue_stub, :fetch, path}` announcement included — assumes without saying so.
+> `Hue.Events.stream/2` sets the same option for an unrelated reason (a stream
+> can't resume from a retry); this is the second, independent reason a Hue test
+> client should never retry silently underneath the thing counting the calls.
+>
+> Also worth naming for anyone extending this module: `:counters.sub/3` on an
+> `:atomics` counter always returns `:ok` — it has no bounds checking and cannot
+> report failure — so `:counters.sub(counter, 1, 1) == :ok` in `failing?/2` has
+> no false branch to reach. It is not a bug (the decrement still happens and the
+> function still returns `true`), but the comparison reads as a condition that
+> isn't one; the implementation above drops it in favour of the decrement as a
+> plain side effect.
+
 - [ ] **Step 5: Run the test to verify it passes**
 
 Run: `cd ~/src/hue-ex && mix test test/hue/stub_test.exs`
 Expected: PASS, 8 tests.
 
 If the eventstream test hangs, the cause is almost always that `Hue.Events.stream/2` opens the connection lazily on first enumeration — the `assert_receive` cannot fire until something enumerates, which is why the test wraps it in `Task.async`. Do not "fix" that by enumerating in the test process.
+
+> **Corrected after implementation.** Under the full suite (`mix test`, not this
+> file alone), `assert_receive {:hue_stub, :eventstream, stream}` at its default
+> 100ms occasionally lost the race against a loaded scheduler — this is a
+> cross-process handshake (the `Task`'s `Req` request reaching the plug and
+> sending its pid back), not a canned response, so it has no floor on how long
+> the first context switch takes under contention. Bumped to `5_000`, matching
+> the allowance `events_test.exs` already gives the same class of handshake
+> against a real socket. Never reproduced running this file alone — full-suite
+> contention is what surfaces it.
+>
+> Separately, and more consequentially: adding this file's tests raised the
+> failure rate of an *already broken* test elsewhere — `Hue.ResourceTest`'s
+> "emits start and stop around a read" — from effectively 0 to about 1 in 25
+> full-suite runs. `:telemetry_test.attach_event_handlers/2` attaches a handler
+> that is not scoped to the attaching test's own calls: it fires for every
+> `[:hue, :request]` span anywhere in the async suite, all forwarded to that
+> test's mailbox under that test's own ref. The ref proves a message came from
+> *that* handler; it says nothing about which test's request produced the
+> underlying event. That test captured `metadata` loosely and asserted on it in
+> a second step, which let a concurrently running test's same-named event
+> satisfy the `assert_received` first. This stub's own tests call
+> `Resource.list_all/1` and `Resource.update/5`, both wrapped in the same
+> `[:hue, :request]` span layer 1 already uses, so adding eight more concurrent
+> emitters of that span made a latent, near-invisible race fire often enough to
+> notice. Fixed in `resource_test.exs` by matching the expected content inside
+> the `assert_received` pattern itself, the way `:telemetry_test`'s own
+> documentation does — 0 failures in 110 runs afterward. Out of scope for this
+> task's own file list, but left unfixed it would have made `mix precommit`
+> measurably less reliable for every task after this one.
 
 - [ ] **Step 6: Verify the stub does not silently swallow unexpected requests**
 
