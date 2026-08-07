@@ -4,6 +4,21 @@ defmodule Hue.BridgeStreamTest do
   alias Hue.Bridge
   alias Hue.Event
 
+  # ExUnit's `assert_receive` defaults to a 100 ms timeout, which is a
+  # reasonable default for a message already sitting in the mailbox but is
+  # not enough for `{:hue_stub, :eventstream, _}` or `{:hue_stub, :fetch, _}`:
+  # both cross a real process boundary (the stub's plug runs in a separately
+  # scheduled task or GenServer reduction), and under the full suite's
+  # concurrency -- `max_cases` runs many other tests' processes at once, not
+  # just this file's -- that handshake can lose the default timeout's race.
+  # Confirmed: full-suite sweeps saw this file's *first* connect assertion
+  # (the ones still on the 100 ms default) time out at a combined ~16% rate
+  # across three 25-30 run sweeps, while the reconnect-phase assertions later
+  # in the same tests, already bumped to 1 000 ms, never did. One shared
+  # attribute rather than a literal repeated in eleven places, so the next
+  # assertion added to this file inherits the margin instead of the mistake.
+  @receive_timeout 1_000
+
   # `Hue.Stub`'s eventstream is a bare function plug (see its moduledoc's "Why
   # not Req.Test"), and a function plug's whole body runs synchronously inside
   # one `Req.request` call: `Plug.Conn.chunk/2` only ever accumulates into the
@@ -76,7 +91,7 @@ defmodule Hue.BridgeStreamTest do
     client = Hue.Stub.client(resources: [light("light-1", 42.0)])
 
     start(name, client, reconnect_after: 10_000)
-    assert_receive {:hue_stub, :eventstream, stream}
+    assert_receive {:hue_stub, :eventstream, stream}, @receive_timeout
     await_live(name)
 
     deliver_and_close(
@@ -94,7 +109,7 @@ defmodule Hue.BridgeStreamTest do
     client = Hue.Stub.client(resources: [light("light-1", 42.0)])
 
     start(name, client, reconnect_after: 10_000)
-    assert_receive {:hue_stub, :eventstream, stream}
+    assert_receive {:hue_stub, :eventstream, stream}, @receive_timeout
     await_live(name)
 
     deliver_and_close(
@@ -112,7 +127,7 @@ defmodule Hue.BridgeStreamTest do
     client = Hue.Stub.client(resources: [light("light-1", 10.0), light("light-2", 20.0)])
 
     start(name, client, reconnect_after: 10_000)
-    assert_receive {:hue_stub, :eventstream, stream}
+    assert_receive {:hue_stub, :eventstream, stream}, @receive_timeout
     await_live(name)
 
     deliver_and_close(
@@ -135,8 +150,8 @@ defmodule Hue.BridgeStreamTest do
 
     start(name, client)
 
-    assert_receive {:hue_stub, :eventstream, _stream}
-    assert_receive {:hue_stub, :fetch, _path}
+    assert_receive {:hue_stub, :eventstream, _stream}, @receive_timeout
+    assert_receive {:hue_stub, :fetch, _path}, @receive_timeout
   end
 
   test "an event delivered at any point during connect is never lost", %{name: name} do
@@ -187,8 +202,8 @@ defmodule Hue.BridgeStreamTest do
       )
 
     start(name, client, retry_after: 200)
-    assert_receive {:hue_stub, :eventstream, _stream}
-    assert_receive {:hue_stub, :fetch, _}
+    assert_receive {:hue_stub, :eventstream, _stream}, @receive_timeout
+    assert_receive {:hue_stub, :fetch, _}, @receive_timeout
 
     # Sent straight to the server rather than through the stub's eventstream:
     # `Hue.Stub` cannot deliver a frame while its connection stays open (see
@@ -225,27 +240,27 @@ defmodule Hue.BridgeStreamTest do
     client = Hue.Stub.client(resources: [light("light-1", 42.0)])
 
     start(name, client, reconnect_after: 10)
-    assert_receive {:hue_stub, :eventstream, stream}
-    assert_receive {:hue_stub, :fetch, _}
+    assert_receive {:hue_stub, :eventstream, stream}, @receive_timeout
+    assert_receive {:hue_stub, :fetch, _}, @receive_timeout
     await_live(name)
 
     Process.exit(stream, :kill)
 
     # A second eventstream and a second full fetch, in that order.
-    assert_receive {:hue_stub, :eventstream, _}, 1_000
-    assert_receive {:hue_stub, :fetch, _}, 1_000
+    assert_receive {:hue_stub, :eventstream, _}, @receive_timeout
+    assert_receive {:hue_stub, :fetch, _}, @receive_timeout
   end
 
   test "a cleanly closed stream reconnects too", %{name: name} do
     client = Hue.Stub.client(resources: [])
 
     start(name, client, reconnect_after: 10)
-    assert_receive {:hue_stub, :eventstream, stream}
+    assert_receive {:hue_stub, :eventstream, stream}, @receive_timeout
     await_live(name)
 
     send(stream, :close)
 
-    assert_receive {:hue_stub, :eventstream, _}, 1_000
+    assert_receive {:hue_stub, :eventstream, _}, @receive_timeout
   end
 
   test "a cleanly closed stream reports :closed, not the generic :normal a bare :DOWN would give",
@@ -273,12 +288,13 @@ defmodule Hue.BridgeStreamTest do
     client = Hue.Stub.client(resources: [])
 
     start(name, client, reconnect_after: 10_000)
-    assert_receive {:hue_stub, :eventstream, stream}
+    assert_receive {:hue_stub, :eventstream, stream}, @receive_timeout
     await_live(name)
 
     send(stream, :close)
 
-    assert_receive {:disconnected, _measurements, %{bridge: ^name, reason: :closed}}, 1_000
+    assert_receive {:disconnected, _measurements, %{bridge: ^name, reason: :closed}},
+                   @receive_timeout
   end
 
   test "a dropped stream emits disconnected telemetry", %{name: name} do
@@ -297,12 +313,13 @@ defmodule Hue.BridgeStreamTest do
     on_exit(fn -> :telemetry.detach(handler) end)
 
     start(name, Hue.Stub.client(resources: []), reconnect_after: 10)
-    assert_receive {:hue_stub, :eventstream, stream}
+    assert_receive {:hue_stub, :eventstream, stream}, @receive_timeout
     await_live(name)
 
     Process.exit(stream, :kill)
 
-    assert_receive {:disconnected, _measurements, %{bridge: ^name, reason: :killed}}, 1_000
+    assert_receive {:disconnected, _measurements, %{bridge: ^name, reason: :killed}},
+                   @receive_timeout
   end
 
   test "reaching live emits connected telemetry carrying downtime", %{name: name} do
@@ -320,14 +337,14 @@ defmodule Hue.BridgeStreamTest do
 
     start(name, Hue.Stub.client(resources: []))
 
-    assert_receive {:connected, %{downtime: 0}, %{bridge: ^name}}, 1_000
+    assert_receive {:connected, %{downtime: 0}, %{bridge: ^name}}, @receive_timeout
   end
 
   test "the cache keeps answering while the stream is down", %{name: name} do
     client = Hue.Stub.client(resources: [light("light-1", 42.0)])
 
     start(name, client, reconnect_after: 10_000)
-    assert_receive {:hue_stub, :eventstream, stream}
+    assert_receive {:hue_stub, :eventstream, stream}, @receive_timeout
     await_live(name)
 
     Process.exit(stream, :kill)
@@ -355,7 +372,7 @@ defmodule Hue.BridgeStreamTest do
     # only a few milliseconds wide and unlikely to be sampled at all.
     timestamps =
       for _ <- 1..6 do
-        assert_receive {:hue_stub, :fetch, _}, 1_000
+        assert_receive {:hue_stub, :fetch, _}, @receive_timeout
         System.monotonic_time(:millisecond)
       end
 
@@ -364,7 +381,27 @@ defmodule Hue.BridgeStreamTest do
     # Generous margins rather than exact multiples of reconnect_after: the
     # property under test is "it grows from the base toward the cap", not
     # "it grows to exactly 40ms on the second attempt".
-    assert Enum.at(gaps, 0) < 60
-    assert Enum.at(gaps, -1) >= 150
+    #
+    # An absolute ceiling on the *first* gap (tried during review, then
+    # tightened once, then measured failing again at 134ms under four
+    # concurrent `mix test` invocations) turned out to be the wrong anchor
+    # regardless of how generous the ceiling was: that gap includes the
+    # connect sequence's own startup cost -- process spawn, supervisor tree
+    # init -- on top of the base delay, and that cost is measurably noisier
+    # under contention than every later gap. Sampled across 22 runs under
+    # heavy parallel load, the *second* gap stayed within a few ms of 40ms
+    # every time while the first ranged from 23ms to 134ms.
+    #
+    # So this compares the second gap against the last instead, and does it
+    # as a ratio rather than an absolute bound: broken backoff leaves every
+    # gap roughly equal no matter how much noise sits on top of each one,
+    # while working backoff grows the gap roughly tenfold (20ms to 200ms)
+    # before capping -- a 3x margin is comfortably below that growth and
+    # comfortably above what scheduling noise alone produces.
+    second_gap = Enum.at(gaps, 1)
+    last_gap = Enum.at(gaps, -1)
+
+    assert last_gap >= second_gap * 3
+    assert last_gap >= 150
   end
 end

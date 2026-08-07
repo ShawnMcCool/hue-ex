@@ -337,7 +337,7 @@ defmodule Hue.Bridge.Server do
   # whatever a crashing task raised as `{exception, stacktrace}`, so the
   # `Hue.Error` case has to be unwrapped explicitly or it falls to the last,
   # catch-all clause and every refusal reads as `:unknown`.
-  defp exit_reason({%Error{reason: reason}, _stacktrace}) when not is_nil(reason), do: reason
+  defp exit_reason({%Error{reason: reason}, _stacktrace}), do: reason
   defp exit_reason({reason, _stacktrace}) when is_atom(reason), do: reason
   defp exit_reason(reason) when is_atom(reason), do: reason
   defp exit_reason(_other), do: :unknown
