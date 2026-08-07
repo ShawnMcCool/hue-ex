@@ -206,8 +206,8 @@ most useful thing to monitor about this library.
 [:hue, :sync, :stop]                            duration, resource_count
 [:hue, :stream, :connected]                     downtime
 [:hue, :stream, :disconnected]                  reason
-[:hue, :write, :coalesced]                      collapsed_count
-[:hue, :write, :failed]                         reason
+[:hue, :write, :coalesced]                      collapsed_count, type, rid
+[:hue, :write, :failed]                         type, rid, reason
 ```
 
 > **Corrected before 0.2.0.** This table previously listed `type, rid, status`
@@ -218,6 +218,11 @@ most useful thing to monitor about this library.
 > slow request concerned currently cannot), but adding it is a behaviour
 > change to what the span carries, not a documentation fix — noted as a
 > possible follow-up, not done here.
+>
+> **Corrected again, closing the final review of layer 2.** The two write
+> rows were missing `type` and `rid`, which `Hue.Bridge.Server` has carried in
+> both events' metadata since each was introduced — this table just never
+> listed them.
 
 `[:hue, :request, *]` and `[:hue, :pairing, *]` (layer 1, via
 `:telemetry.span/3`) fire around every `Hue.Resource` call and every

@@ -9,12 +9,17 @@ defmodule Hue.ZoneTest do
   # message that crosses a real process boundary (the stub's plug, a spawned
   # task) loses the 100 ms default under the full suite's concurrency.
   @receive_timeout 1_000
+  # A bounded window, not a bare refute_receive: proving nothing arrives
+  # needs time to not-arrive in. See Hue.GroupTest's own note.
+  @refute_window 200
 
   # Hue.GroupTest exercises Zone only through cases shared with Room --
   # "zone write goes to grouped_light" and a not_dimmable failure -- so a
   # Zone-only regression (get/2 returning the wrong thing, a dimmable zone
   # write breaking, or a missing zone reporting the wrong reason) would not
-  # be caught there. This file is Zone's own account.
+  # be caught there. This file is Zone's own account, including the
+  # no_grouped_light and not_dimmable cases Hue.GroupTest only exercises
+  # through Room fixtures.
   setup context do
     name =
       Module.concat(Hue.ZoneTest, context.test |> to_string() |> String.replace(~r/\W/, "_"))
@@ -31,7 +36,20 @@ defmodule Hue.ZoneTest do
         "id" => "gl-1",
         "on" => %{"on" => false},
         "dimming" => %{"brightness" => 50.0}
-      }
+      },
+      %{
+        "type" => "zone",
+        "id" => "zone-2",
+        "metadata" => %{"name" => "Empty Zone"},
+        "services" => []
+      },
+      %{
+        "type" => "zone",
+        "id" => "zone-3",
+        "metadata" => %{"name" => "Garden"},
+        "services" => [%{"rid" => "gl-2", "rtype" => "grouped_light"}]
+      },
+      %{"type" => "grouped_light", "id" => "gl-2", "on" => %{"on" => false}}
     ]
 
     start_supervised!({Bridge, name: name, client: Hue.Stub.client(resources: resources)},
@@ -68,5 +86,19 @@ defmodule Hue.ZoneTest do
   test "a zone that does not exist is :not_found", %{name: name} do
     assert {:error, %Error{reason: :not_found}} = Zone.set(name, "Nowhere", on: true)
     assert {:error, %Error{reason: :not_found}} = Zone.get(name, "Nowhere")
+  end
+
+  test "an empty zone is :no_grouped_light and sends nothing", %{name: name} do
+    assert {:error, %Error{reason: :no_grouped_light, rid: "zone-2"}} =
+             Zone.set(name, "Empty Zone", on: true)
+
+    refute_receive {:hue_stub, :put, _, _}, @refute_window
+  end
+
+  test "dimming a zone whose grouped_light has no dimming is :not_dimmable", %{name: name} do
+    assert {:error, %Error{reason: :not_dimmable, rid: "gl-2"}} =
+             Zone.set(name, "Garden", brightness: 25)
+
+    refute_receive {:hue_stub, :put, _, _}, @refute_window
   end
 end

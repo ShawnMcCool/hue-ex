@@ -528,8 +528,8 @@ discarding either.
 [:hue, :pairing, :start | :stop | :exception]     duration, method, path, result
 [:hue, :stream, :connected | :disconnected]       reason, downtime
 [:hue, :sync, :stop]                              resource_count, duration
-[:hue, :write, :coalesced]                        collapsed_count
-[:hue, :write, :failed]                           reason
+[:hue, :write, :coalesced]                        collapsed_count, type, rid
+[:hue, :write, :failed]                           type, rid, reason
 ```
 
 > **Corrected after implementation.** `[:hue, :write, :failed]` was missing
@@ -578,6 +578,15 @@ discarding either.
 > real gap, but adding `rid` to the metadata is a behaviour change to what
 > the span carries, not a documentation fix, so it is left as a possible
 > follow-up rather than done here.
+>
+> **Corrected a fourth time, closing the final review of layer 2.** The write
+> rows never got the same scrutiny the `[:hue, :request]` row above did.
+> `Hue.Bridge.Server`'s `handle_cast({:write, ...})` emits
+> `[:hue, :write, :coalesced]` with metadata `%{bridge:, type:, rid:}`, and
+> `report_write_failure/3` emits `[:hue, :write, :failed]` with metadata
+> `%{bridge:, type:, rid:, reason:}` — both rows above were missing `type` and
+> `rid`. Every other row was re-checked against its call site at the same
+> time and found accurate.
 
 `[:hue, :stream, :disconnected]` is the important one. The characteristic failure
 of this library is silence: a dead stream means every read is quietly stale, and

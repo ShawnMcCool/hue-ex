@@ -50,6 +50,21 @@ defmodule Hue.Bridge do
   restart plus resync is the honest response; only a stream drop earns "stale
   beats nothing."
 
+  The same crash also loses the *outcome* of any write already on the wire
+  when it happens — a different thing from the cached state discussed above,
+  and lost for a different reason. A write's result arrives at its
+  `Hue.Bridge.Server` as a plain `{ref, result}` message addressed to that
+  process; a crash replaces it with a new process that knows nothing of the
+  old one's in-flight tasks, so the message arrives at a pid nothing is
+  listening on and is silently discarded. A caller that used `await: true`
+  sees `{:error, %Hue.Error{reason: :timeout}}` instead of the write's real
+  result, and an ordinary subscriber sees nothing at all — no telemetry, no
+  `error` event. This is accepted for the same reason the cached state is
+  discarded rather than preserved: a `Hue.Bridge.Server` crash is a bug, not
+  an expected condition, and this library does not spend complexity — an heir
+  process, a durable write log — insuring an outcome against a case that
+  should not happen in the first place.
+
   ## Options
 
     * `:name` — the name this bridge is addressed by. Defaults to `Hue.Bridge`.
