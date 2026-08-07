@@ -72,6 +72,7 @@ defmodule Hue.Bridge.Server do
   alias Hue.Bridge.Cache
   alias Hue.Client
   alias Hue.Error
+  alias Hue.Event
   alias Hue.Resource
 
   @default_retry_after :timer.seconds(5)
@@ -160,7 +161,17 @@ defmodule Hue.Bridge.Server do
   end
 
   def handle_info({:hue_event, event}, state) do
+    # Resolved before applying: a delete removes the resource and its index
+    # entries, and a subscriber who asked for "Iris" by name most needs to
+    # hear the event that removed Iris. The cost is symmetric — a rename
+    # notifies subscribers of the old name, not the new one — which is the
+    # correct reading of "which subscription does this event concern": the
+    # subscriber asked about the thing they knew as Iris.
+    name = Cache.name_of(state.table, event.resource_type, event.rid)
+
     Cache.apply_event(state.table, event)
+    dispatch(state, event, name)
+
     {:noreply, state}
   end
 
@@ -341,4 +352,35 @@ defmodule Hue.Bridge.Server do
   defp exit_reason({reason, _stacktrace}) when is_atom(reason), do: reason
   defp exit_reason(reason) when is_atom(reason), do: reason
   defp exit_reason(_other), do: :unknown
+
+  # -- dispatch ----------------------------------------------------------
+
+  # Fans one event out to the three registry keys it always matches
+  # (`:all`, its type, its rid) plus a fourth when the resource is named,
+  # rather than to every subscriber. A process registered under
+  # `{:type, :button}` is not in `Registry.dispatch/3`'s entry list for a
+  # light event at all — Registry does the filtering, this function only
+  # decides which keys apply.
+  #
+  # Subscribing under two matching keys (`:all` and `{:type, :light}`, say)
+  # delivers twice for one event: this walks every matching key and dispatches
+  # to each independently, with no de-duplication across them. See
+  # `Hue.Bridge.subscribe/2`'s "Subscribing twice with different filters".
+  defp dispatch(state, %Event{} = event, resource_name) do
+    registry = Bridge.registry(state.name)
+    message = {:hue, event}
+
+    keys = [:all, {:type, event.resource_type}, {:rid, event.rid}]
+    keys = if resource_name, do: [{:name, resource_name} | keys], else: keys
+
+    Enum.each(keys, &dispatch_to_key(registry, &1, message))
+  end
+
+  defp dispatch_to_key(registry, key, message) do
+    Registry.dispatch(registry, key, &send_to_each(&1, message))
+  end
+
+  defp send_to_each(subscribers, message) do
+    Enum.each(subscribers, fn {pid, _value} -> send(pid, message) end)
+  end
 end

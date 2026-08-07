@@ -192,6 +192,87 @@ defmodule Hue.Bridge do
   @spec name_of(atom(), atom(), String.t()) :: String.t() | nil
   def name_of(name \\ @default_name, type, rid), do: Cache.name_of(table(name), type, rid)
 
+  @doc """
+  Subscribes the calling process to this bridge's events.
+
+  Delivers `{:hue, %Hue.Event{}}`. The subscription is removed automatically
+  when the calling process dies — `Registry` monitors it — so a LiveView that
+  crashes leaves nothing behind.
+
+  ## Filters
+
+      Hue.Bridge.subscribe(bridge)                 # everything
+      Hue.Bridge.subscribe(bridge, type: :button)   # just switches
+      Hue.Bridge.subscribe(bridge, name: "Iris")    # one light, by its device's name
+      Hue.Bridge.subscribe(bridge, rid: rid)        # one resource, by identity
+
+  Filtering happens at the registry rather than in your `handle_info`. A
+  process waiting on button presses is not in the dispatch list for a light
+  event at all, so it is not woken when a scene runs and nineteen lights
+  change.
+
+  Subscribing twice with different filters delivers twice for an event
+  matching both. That is the honest reading of two subscriptions; use one
+  filter if you want one message. The registry underneath is `:duplicate`,
+  which means this holds even for the *same* filter called twice from the
+  same process — each call adds another entry rather than being ignored as
+  already registered, so calling `subscribe/2` twice with identical
+  arguments doubles delivery permanently, and a single `unsubscribe/2` call
+  removes every entry registered under that filter at once rather than
+  peeling one off. Call `subscribe/2` once per filter you actually want.
+
+  ## A note on names
+
+  An event is matched against the name the resource had **before** the event
+  was applied. For everything except a rename these are the same. For a
+  rename, the event is delivered to subscribers of the old name and
+  subsequent events to the new — which is what a subscriber who asked about
+  "Iris" would expect to see.
+  """
+  @spec subscribe(atom(), keyword()) :: :ok | {:error, Error.t()}
+  def subscribe(name \\ @default_name, filter \\ []) do
+    # subscription_key/1 is called outside the try: an unrecognised filter is
+    # a caller bug (see Hue.Error's "never used for an argument that could
+    # not have been valid") and must raise, never be caught by the guard
+    # below meant for "no bridge is running." A function-level `rescue`
+    # would catch both — subscription_key/1 raises the same ArgumentError
+    # `Registry.register/3` does for a name with no registry — and silently
+    # misreport a caller's malformed filter as :not_started even against a
+    # live bridge.
+    key = subscription_key(filter)
+
+    try do
+      case Registry.register(registry(name), key, nil) do
+        {:ok, _owner} -> :ok
+        {:error, {:already_registered, _pid}} -> :ok
+      end
+    rescue
+      ArgumentError -> {:error, %Error{reason: :not_started}}
+    end
+  end
+
+  @doc "Removes a subscription registered with the same filter."
+  @spec unsubscribe(atom(), keyword()) :: :ok
+  def unsubscribe(name \\ @default_name, filter \\ []) do
+    key = subscription_key(filter)
+
+    try do
+      Registry.unregister(registry(name), key)
+    rescue
+      ArgumentError -> :ok
+    end
+  end
+
+  defp subscription_key([]), do: :all
+  defp subscription_key(type: type), do: {:type, type}
+  defp subscription_key(name: name), do: {:name, name}
+  defp subscription_key(rid: rid), do: {:rid, rid}
+
+  defp subscription_key(filter) do
+    raise ArgumentError,
+          "expected one of type:, name:, or rid:, or no filter at all, got: #{inspect(filter)}"
+  end
+
   @doc false
   def table(name), do: Module.concat(name, Cache)
   @doc false
