@@ -246,6 +246,45 @@ defmodule Hue.BridgeSubscriptionsTest do
     refute_receive {:hue, _}, @refute_window
   end
 
+  # A `:duplicate` registry never refuses a second `register/3` call for the
+  # same key from the same process -- see the point-2 finding this fix comes
+  # from -- so idempotence has to be `subscribe/2`'s own job. This is the
+  # positive half of that: one subscription in, one message out.
+  test "subscribing twice with the same filter is a no-op", %{name: name} do
+    stream = start(name)
+    :ok = Bridge.subscribe(name, type: :light)
+    :ok = Bridge.subscribe(name, type: :light)
+
+    deliver_and_close(
+      stream,
+      frame([%{"type" => "light", "id" => "light-1", "on" => %{"on" => true}}])
+    )
+
+    assert_receive {:hue, %Event{resource_type: :light, rid: "light-1"}}, @receive_timeout
+    # A bare refute_receive is vacuous -- it passes because a second message
+    # has not arrived *yet*. @refute_window gives a broken idempotence check
+    # (one that still registered a second entry) time to be wrong.
+    refute_receive {:hue, _}, @refute_window
+  end
+
+  test "a single unsubscribe after a double subscribe stops delivery completely", %{name: name} do
+    stream = start(name)
+    :ok = Bridge.subscribe(name, type: :light)
+    :ok = Bridge.subscribe(name, type: :light)
+    :ok = Bridge.unsubscribe(name, type: :light)
+
+    # Genuinely gone, not merely down to one entry -- the double subscribe
+    # above must not have left a second, orphaned registration behind.
+    assert Registry.lookup(Bridge.registry(name), {:type, :light}) == []
+
+    deliver_and_close(
+      stream,
+      frame([%{"type" => "light", "id" => "light-1", "on" => %{"on" => true}}])
+    )
+
+    refute_receive {:hue, _}, @refute_window
+  end
+
   # Registry.dispatch/3 sends to whatever is registered when the event
   # arrives; a subscriber that has already died between registering and the
   # event firing must not crash the dispatching server. This closes the

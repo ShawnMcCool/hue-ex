@@ -211,15 +211,12 @@ defmodule Hue.Bridge do
   event at all, so it is not woken when a scene runs and nineteen lights
   change.
 
-  Subscribing twice with different filters delivers twice for an event
-  matching both. That is the honest reading of two subscriptions; use one
-  filter if you want one message. The registry underneath is `:duplicate`,
-  which means this holds even for the *same* filter called twice from the
-  same process — each call adds another entry rather than being ignored as
-  already registered, so calling `subscribe/2` twice with identical
-  arguments doubles delivery permanently, and a single `unsubscribe/2` call
-  removes every entry registered under that filter at once rather than
-  peeling one off. Call `subscribe/2` once per filter you actually want.
+  Subscribing again with the **same** filter is a no-op: you get one
+  subscription, not two, which is what makes it safe to call from
+  `mount/3` on both the dead render and the connected one without an
+  `if connected?(socket)` guard. Subscribing with **different** filters is
+  a genuinely different subscription each time — an event matching both
+  delivers twice, because that is what you asked for.
 
   ## A note on names
 
@@ -236,19 +233,37 @@ defmodule Hue.Bridge do
     # not have been valid") and must raise, never be caught by the guard
     # below meant for "no bridge is running." A function-level `rescue`
     # would catch both — subscription_key/1 raises the same ArgumentError
-    # `Registry.register/3` does for a name with no registry — and silently
+    # `Registry.lookup/2` does for a name with no registry — and silently
     # misreport a caller's malformed filter as :not_started even against a
     # live bridge.
     key = subscription_key(filter)
 
     try do
-      case Registry.register(registry(name), key, nil) do
-        {:ok, _owner} -> :ok
-        {:error, {:already_registered, _pid}} -> :ok
+      if already_subscribed?(registry(name), key) do
+        :ok
+      else
+        # This registry is `:duplicate`, which never answers
+        # `{:error, {:already_registered, pid}}` — every `register/3` call
+        # succeeds and adds its own entry, even from a process that is
+        # already registered under this exact key. The idempotence
+        # `mount/3` calling this twice needs has to be checked for above,
+        # not read off this call's return value.
+        {:ok, _owner} = Registry.register(registry(name), key, nil)
+        :ok
       end
     rescue
       ArgumentError -> {:error, %Error{reason: :not_started}}
     end
+  end
+
+  # `self()` in a `:duplicate` registry's own entry list for this key, not
+  # merely "someone is registered under this key" — a second process
+  # subscribing with the same filter is a second, distinct subscription and
+  # must still be delivered to.
+  defp already_subscribed?(registry, key) do
+    registry
+    |> Registry.lookup(key)
+    |> Enum.any?(fn {pid, _value} -> pid == self() end)
   end
 
   @doc "Removes a subscription registered with the same filter."
