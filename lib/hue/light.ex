@@ -43,7 +43,7 @@ defmodule Hue.Light do
   Earlier versions of `get/2` and `set/3` repeated `is_binary(target)` and
   `is_list(options)` guards that something one call down already enforces —
   `Hue.Bridge.Graph.resolve/3` for `target`, `Keyword.pop/3` (inside
-  `Hue.Bridge.pop_await/1`) and `Hue.Bridge.Body.build/2` for `options`. A
+  `Hue.Bridge`'s await handling) and `Hue.Bridge.Body.build/2` for `options`. A
   wrong shape still raises `FunctionClauseError`, just from the module that
   actually needed to know, rather than from two places that could drift
   apart. `Hue.Room`, `Hue.Zone`, and `Hue.Scene` never had these guards;
