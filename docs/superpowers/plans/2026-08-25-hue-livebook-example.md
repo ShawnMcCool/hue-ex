@@ -167,9 +167,10 @@ children = [
 
 In Livebook, `Kino.start_child/1` is that same placement. On start the
 bridge fetches everything once to seed its cache, then holds an eventstream
-open to keep it current; `:live` means both are done. Re-running this cell
-errors with `:already_started` — that's your supervision tree telling the
-truth, not a bug. Restart the runtime to start over.
+open to keep it current; `:live` means both are done. Kino ties the child's
+lifetime to this cell rather than to the runtime, so re-running it tears
+down the old bridge and starts a fresh one — no error, no restart required,
+the Livebook analogue of a supervisor restarting a child.
 
 ```elixir
 {:ok, client} = Hue.from_bridge(bridge_info, application_key: application_key)
@@ -177,10 +178,18 @@ truth, not a bug. Restart the runtime to start over.
 
 Enum.reduce_while(1..50, nil, fn _, _ ->
   case Hue.Bridge.status(LivebookHue) do
-    :live -> {:halt, :live}
-    status -> Process.sleep(200) && {:cont, status}
+    :live ->
+      {:halt, :live}
+
+    status ->
+      Process.sleep(200)
+      {:cont, status}
   end
 end)
+|> case do
+  :live -> :live
+  status -> raise "bridge did not reach :live within 10s, last status: #{inspect(status)}"
+end
 ```
 
 ## What's in the house
