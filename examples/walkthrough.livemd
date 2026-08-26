@@ -29,7 +29,7 @@ badge-launched, or deployed as a Livebook app, shares one pairing:
 - macOS — `~/Library/Application Support/hue_livebooks/hue.json`
 - Windows — `%APPDATA%\hue_livebooks\hue.json`
 
-Delete the canonical file to start over from discovery.
+Delete that file to start over from discovery.
 
 ```elixir
 creds_path =
