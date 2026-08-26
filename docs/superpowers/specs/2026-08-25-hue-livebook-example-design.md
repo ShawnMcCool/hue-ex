@@ -45,6 +45,13 @@ In journey order, each with prose explaining why before code showing how:
    `Kino.Frame` as the reader flips lights in the Hue app, showing the
    eventstream and the cache updating.
 
+> **Corrected after implementation.** Two of the walkthrough details narrowed
+> in the built notebook. Item 4 shows lights, rooms, and scenes but no zones
+> table — many homes have none, and an empty table teaches nothing; zones
+> appear in the control section's `Hue.Zone.set/3` mention instead. Item 5's
+> "on/off buttons" became a checkbox inside a single submit form, which is the
+> Kino idiom for a form that also carries the brightness slider.
+
 ## Re-runnability
 
 Pairing produces the application key and the pinned bridge identity. The
