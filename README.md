@@ -115,9 +115,9 @@ already had. The state change itself arrives on the eventstream.
 
 ## Try it
 
-[![Run in Livebook](https://livebook.dev/badge/v1/blue.svg)](https://livebook.dev/run?url=https%3A%2F%2Fraw.githubusercontent.com%2FShawnMcCool%2Fhue-ex%2Fmain%2Fexamples%2Fhue.livemd)
+[![Run in Livebook](https://livebook.dev/badge/v1/blue.svg)](https://livebook.dev/run?url=https%3A%2F%2Fraw.githubusercontent.com%2FShawnMcCool%2Fhue-ex%2Fmain%2Fexamples%2Fwalkthrough.livemd)
 
-[`examples/hue.livemd`](examples/hue.livemd) is an interactive notebook that
+[`examples/walkthrough.livemd`](examples/walkthrough.livemd) is an interactive notebook that
 walks the whole journey against your real bridge — discover, pair (one press
 of the link button), control lights by name, and watch changes stream in
 live. It doubles as a small light-control panel.

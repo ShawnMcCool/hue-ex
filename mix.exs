@@ -77,7 +77,7 @@ defmodule Hue.MixProject do
   defp docs do
     [
       main: "readme",
-      extras: ["README.md", {"examples/hue.livemd", filename: "livebook"}],
+      extras: ["README.md", {"examples/walkthrough.livemd", filename: "walkthrough"}],
       source_ref: "v#{@version}",
       groups_for_modules: [
         Core: [Hue, Hue.Client, Hue.Resource, Hue.Error],

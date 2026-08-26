@@ -201,7 +201,7 @@ malformed value raises, because that's a bug in the code, not a fact about
 the bulb.
 
 ```elixir
-light = "Desk Lamp"
+light = "Credenza Lamp"
 
 :ok = Hue.Light.set(LivebookHue, light, on: true, brightness: 40)
 ```
@@ -224,33 +224,13 @@ Rooms, zones, and scenes work the same way — `Hue.Room.set/3`,
 :skipped
 ```
 
-## A little control panel
+## A control panel, elsewhere
 
-The example turns tool here: pick a light and drive it. This is nothing but
-the calls you just made, wired to a form.
-
-```elixir
-light_names =
-  lights
-  |> Enum.map(&Hue.Bridge.name_of(LivebookHue, :light, &1["id"]))
-  |> Enum.sort()
-
-form =
-  Kino.Control.form(
-    [
-      light: Kino.Input.select("Light", Enum.map(light_names, &{&1, &1})),
-      on: Kino.Input.checkbox("On", default: true),
-      brightness: Kino.Input.range("Brightness", min: 1, max: 100, default: 50)
-    ],
-    submit: "Apply"
-  )
-
-Kino.listen(form, fn %{data: data} ->
-  Hue.Light.set(LivebookHue, data.light, on: data.on, brightness: data.brightness)
-end)
-
-form
-```
+Driving lights from forms is a different job from learning the API, so it
+has its own notebook: [`control_panel.livemd`](control_panel.livemd) is a
+full interface to your bridge — rooms, lights, scenes, management — and it
+reuses the `.hue.json` this notebook just saved, so it connects without
+pairing again.
 
 ## Watch it live
 
