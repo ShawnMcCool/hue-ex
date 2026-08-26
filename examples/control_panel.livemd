@@ -201,11 +201,11 @@ defmodule Panel do
       end)
       |> then(fn a ->
         cond do
-          xy = get_in(light, ["color", "xy"]) ->
-            Map.put(a, "color", %{"xy" => xy})
-
           mirek = get_in(light, ["color_temperature", "mirek"]) ->
             Map.put(a, "color_temperature", %{"mirek" => mirek})
+
+          xy = get_in(light, ["color", "xy"]) ->
+            Map.put(a, "color", %{"xy" => xy})
 
           true ->
             a
@@ -395,7 +395,15 @@ long-lived router process, neither condition ever fires between rebuilds, so
 the old listener processes would otherwise accumulate for the life of the
 session. `scene_listeners` holds the pids `Kino.listen` returns so each
 rebuild can `Kino.terminate_child/1` the previous batch before starting the
-next.
+next. A click that lands in the narrow window while a rebuild is replacing
+its button can be dropped along with the listener that would have handled
+it; this is accepted rather than guarded against, since the reappearing row
+is itself the feedback that the click needs to be repeated.
+
+Scene renames arrive as a plain `:update`, which does not trigger a rebuild,
+so a renamed scene's button keeps its old label until the next add or
+delete — recall keys on rid, not name, so the stale label still recalls the
+right scene.
 
 ```elixir
 {:ok, scene_listeners} = Kino.start_child({Agent, fn -> [] end})
@@ -467,7 +475,15 @@ rebuild_scenes = fn ->
   leftover_results =
     for {group_rid, group_scenes} <- by_group, not MapSet.member?(room_ids, group_rid) do
       %{"rtype" => rtype} = hd(group_scenes)["group"]
-      heading = Panel.name(String.to_existing_atom(rtype), group_rid)
+
+      group_type =
+        case rtype do
+          "room" -> :room
+          "zone" -> :zone
+          _ -> nil
+        end
+
+      heading = if group_type, do: Panel.name(group_type, group_rid), else: group_rid
       group_block.(heading, group_scenes, nil)
     end
 
@@ -502,8 +518,13 @@ rebuild_scenes.()
          if event.resource_type == :zigbee_connectivity,
            do: Panel.render_light_state(ui, Agent.get(selected_light, & &1))
 
-         if event.resource_type == :scene and event.type in [:add, :delete],
-           do: rebuild_scenes.()
+         if event.resource_type == :scene and event.type in [:add, :delete] do
+           try do
+             rebuild_scenes.()
+           rescue
+             e -> Panel.report(ui, "scenes rebuild failed: #{Exception.message(e)}")
+           end
+         end
 
          history
        end)

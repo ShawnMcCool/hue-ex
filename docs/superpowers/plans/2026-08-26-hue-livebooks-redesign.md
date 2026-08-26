@@ -596,11 +596,11 @@ the selected rid because light events are frequent.
       end)
       |> then(fn a ->
         cond do
-          xy = get_in(light, ["color", "xy"]) ->
-            Map.put(a, "color", %{"xy" => xy})
-
           mirek = get_in(light, ["color_temperature", "mirek"]) ->
             Map.put(a, "color_temperature", %{"mirek" => mirek})
+
+          xy = get_in(light, ["color", "xy"]) ->
+            Map.put(a, "color", %{"xy" => xy})
 
           true ->
             a
@@ -636,7 +636,15 @@ long-lived router process, neither condition ever fires between rebuilds, so
 the old listener processes would otherwise accumulate for the life of the
 session. `scene_listeners` holds the pids `Kino.listen` returns so each
 rebuild can `Kino.terminate_child/1` the previous batch before starting the
-next.
+next. A click that lands in the narrow window while a rebuild is replacing
+its button can be dropped along with the listener that would have handled
+it; this is accepted rather than guarded against, since the reappearing row
+is itself the feedback that the click needs to be repeated.
+
+Scene renames arrive as a plain `:update`, which does not trigger a rebuild,
+so a renamed scene's button keeps its old label until the next add or
+delete — recall keys on rid, not name, so the stale label still recalls the
+right scene.
 
 ```elixir
 {:ok, scene_listeners} = Kino.start_child({Agent, fn -> [] end})
@@ -708,7 +716,15 @@ rebuild_scenes = fn ->
   leftover_results =
     for {group_rid, group_scenes} <- by_group, not MapSet.member?(room_ids, group_rid) do
       %{"rtype" => rtype} = hd(group_scenes)["group"]
-      heading = Panel.name(String.to_existing_atom(rtype), group_rid)
+
+      group_type =
+        case rtype do
+          "room" -> :room
+          "zone" -> :zone
+          _ -> nil
+        end
+
+      heading = if group_type, do: Panel.name(group_type, group_rid), else: group_rid
       group_block.(heading, group_scenes, nil)
     end
 
@@ -727,13 +743,22 @@ rebuild_scenes.()
   rid matches no listed room (zone-owned scenes, e.g. `full_state.json`'s
   "Scene 15/16/22") group under a heading resolved via `Panel.name/2` and get
   recall rows but no save form — save is room-only by construction (the
-  create body's `"group"` is hardcoded to `"rtype" => "room"`).
+  create body's `"group"` is hardcoded to `"rtype" => "room"`). The leftover
+  branch maps `rtype` through an explicit `case` rather than
+  `String.to_existing_atom/1`: an unrecognised `rtype` falls through to
+  `nil` and the block heads with the raw group rid rather than risking an
+  `ArgumentError` on an atom the runtime never interned.
 
 - [ ] **Step 3: Router** — after the `:zigbee_connectivity` clause, add:
 
 ```elixir
-         if event.resource_type == :scene and event.type in [:add, :delete],
-           do: rebuild_scenes.()
+         if event.resource_type == :scene and event.type in [:add, :delete] do
+           try do
+             rebuild_scenes.()
+           rescue
+             e -> Panel.report(ui, "scenes rebuild failed: #{Exception.message(e)}")
+           end
+         end
 ```
 
   Only `:add`/`:delete` trigger a rebuild. Plain `:update` scene events (the
@@ -745,9 +770,36 @@ rebuild_scenes.()
   Scenes section (Step 2) binds before the Event router cell — same
   ordering rule as Task 4's `selected_light`.
 
+  The rebuild call is wrapped in `try`/`rescue` because it runs inside the
+  router's own `:temporary` `Task` — any uncaught raise there (an
+  unanticipated `rtype`, a transient cache miss, anything not already
+  guarded) would kill the whole router, silently ending live updates for
+  every tab, not just Scenes. A rescue reports the failure through
+  `Panel.report/2` instead and lets the router keep running for the next
+  event. The Scenes cell's own initial `rebuild_scenes.()` call (Step 2) is
+  deliberately left unwrapped — a crash there happens at evaluation time,
+  in the open, and should be loud rather than swallowed. The `case` added
+  to the leftover-heading branch above removes the one raise this rescue
+  was guarding against by name; the rescue stays as a backstop against
+  whatever else a future change might introduce, not as the plan for this
+  one.
+
 - [ ] **Step 4: Tab** — `{"Scenes", ui.scenes}` after Lights.
 
-- [ ] **Step 5: Proofread** — confirmed clean, no code changes needed:
+- [ ] **Step 5: Proofread** — one defect found and fixed, everything else confirmed clean:
+  - **`scene_action/1`'s `cond` order (fixed).** The first draft checked
+    `color.xy` before `color_temperature.mirek`. Checked against every light
+    in `full_state.json` that carries a `color_temperature` service: `mirek`
+    is non-nil exactly when `mirek_valid` is `true`, and is `nil` on every
+    light where `mirek_valid` is `false` — a clean, reliable signal for
+    "this bulb is currently in colour-temperature mode." `color.xy`, by
+    contrast, is populated on most colour-capable bulbs regardless of which
+    mode they're in — several fixture lights carry a populated `xy` at the
+    same time as a valid `mirek`. Checking `xy` first meant a bulb sitting in
+    warm-white CT mode got snapshotted as an XY approximation, and recalling
+    that scene would drive it into colour mode instead of reproducing the CT
+    state it was captured in. Fixed by swapping the `cond` branches: `mirek`
+    is checked first, `xy` is the fallback for lights with no valid mirek.
   - Scene create body shape confirmed against `full_state.json`'s 34 scene
     resources: every `actions` entry is exactly
     `%{"target" => %{"rid", "rtype"}, "action" => %{...}}`, and every scene's
@@ -768,7 +820,8 @@ rebuild_scenes.()
   - Controls inside frames: already proven by Task 3's `ui.rooms` (buttons and a form composed via `Kino.Layout.grid` and rendered into a frame) and reused as-is here — no restructuring needed.
   - **Listener lifecycle** (kino 0.19.0, the exact version this repo's `Mix.install` pins): `Kino.Control.new/1` (backing `button/1` and `form/2`, `lib/kino/control.ex`) calls `Kino.Bridge.reference_object(ref, self())`. `Kino.Bridge.reference_object/2`'s doc (`lib/kino/bridge.ex`) states plainly: "Any monitoring added to `object` will be dispatched once all of its associated pids terminate or the associated cells reevaluate." There is no third condition for "the control stopped being rendered." `Kino.listen/2` (`lib/kino.ex`) spawns its worker via `async/1`, which calls `Kino.start_child(%{id: Task, start: {Kino.Terminator, :start_task, [self(), fun]}, restart: :temporary})` and returns the resulting pid (`@spec listen(...) :: pid()`). Both the control's `reference_object` pid and the listener Task's parent-link are the pid that was executing when `rebuild_scenes.()` ran — the Event router's long-lived `Task` process, since the router calls `rebuild_scenes.()` directly rather than re-evaluating the Scenes cell. That process never terminates and its cell (Event router) never reevaluates between rebuilds, so neither of `reference_object`'s two cleanup conditions ever fires: a rebuild that only replaces `ui.scenes`' rendered content, without also killing the previous batch's listeners, would accumulate one live `Task` per stale scene button/form on every `:scene` add/delete for the life of the session — exactly the unbounded growth the task named as the risk. Fix: `scene_listeners` (an `Agent` started once) holds the pid `Kino.listen/2` returns for every control created in a rebuild; the next rebuild's first action is `Enum.each(Agent.get(scene_listeners, & &1), &Kino.terminate_child/1)` — `Kino.terminate_child/1` (`lib/kino.ex`, public since 0.9.1) calls `DynamicSupervisor.terminate_child(Kino.DynamicSupervisor, pid)` on exactly the pid `Kino.start_child/1` handed back, so it is the correct, documented way to stop what `Kino.listen/2` started. This kills the stale listener processes; it does not clear the dead controls' `Kino.SubscriptionManager` topic entries (those stay keyed until the creating pid dies or its cell reevaluates), but a topic entry with no listening process and no rendered client element is inert bookkeeping, not a live process — the growth that mattered (processes, each blocked in `Enum.each` on a stream) is what gets bounded.
   - Binding order: `## Scenes` sits after `## Lights` and before `## Event router`, so `ui`, `Panel`, and `client` (Connect/Helpers) are already in scope, and `save_scene`/`rebuild_scenes` (bound in Scenes) are in scope for the router's added `:scene` dispatch clause.
-  - All 9 code cells (including the two touched by this task) syntax-checked with `Code.string_to_quoted!/1` — clean.
+  - **Router hardening.** `rebuild_scenes.()` runs inside the router's `:temporary` `Task` (Step 3's `try`/`rescue`), so a raise there no longer kills the router and silently stops every tab's live updates — it reports through `Panel.report/2` and the router keeps consuming events. The leftover-group heading no longer calls `String.to_existing_atom/1` on a bridge-supplied string at all (Step 2's `case rtype do "room" -> :room; "zone" -> :zone; _ -> nil end`), which was the one raise this task could name concretely; the rescue is kept as a backstop against whatever else might surface, not as the primary defense.
+  - All 9 code cells (including the three touched by this task) syntax-checked with `Code.string_to_quoted!/1` — clean.
 
 - [ ] **Step 6: Commit** — `Control panel: scenes recalled and captured`
 
