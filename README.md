@@ -121,6 +121,15 @@ nothing is ever blocked on a missing wrapper. `list/3` and `create/4` return
 return a bare `:ok`, because the bridge answers a write with only the rid you
 already had. The state change itself arrives on the eventstream.
 
+## Try it
+
+[![Run in Livebook](https://livebook.dev/badge/v1/blue.svg)](https://livebook.dev/run?url=https%3A%2F%2Fraw.githubusercontent.com%2FShawnMcCool%2Fhue-ex%2Fmain%2Fexamples%2Fhue.livemd)
+
+[`examples/hue.livemd`](examples/hue.livemd) is an interactive notebook that
+walks the whole journey against your real bridge — discover, pair (one press
+of the link button), control lights by name, and watch changes stream in
+live. It doubles as a small light-control panel.
+
 ## Layer 2 — the live model
 
 Layer 1 is a protocol client: every call is a request. That is the right shape
