@@ -1,0 +1,172 @@
+<!-- livebook:{"app_settings":{"access_type":"public","slug":"hue-panel"}} -->
+
+# Hue Control Panel
+
+```elixir
+Mix.install([
+  {:hue, "~> 0.2"},
+  {:kino, "~> 0.19"}
+])
+```
+
+## Connect
+
+Run all. If `.hue.json` exists beside this notebook (the walkthrough saves
+it), the panel connects with it; otherwise it discovers your bridge and
+pairs — press the round link button when asked.
+
+```elixir
+creds_path = Path.join(__DIR__, ".hue.json")
+
+saved =
+  case File.read(creds_path) do
+    {:ok, json} -> Jason.decode!(json)
+    {:error, :enoent} -> nil
+  end
+
+{bridge_info, application_key} =
+  if saved do
+    {%Hue.Bridge.Info{
+       host: saved["host"],
+       port: saved["port"],
+       bridge_id: saved["bridge_id"],
+       fingerprint: saved["fingerprint"]
+     }, saved["application_key"]}
+  else
+    {:ok, [info | _]} = Hue.Discovery.discover()
+    IO.puts("Press the round link button on the bridge…")
+    {:ok, %{application_key: key}} = Hue.Pairing.pair_when_pressed(info, app: "livebook")
+
+    File.write!(
+      creds_path,
+      Jason.encode!(%{
+        host: info.host,
+        port: info.port,
+        bridge_id: info.bridge_id,
+        fingerprint: info.fingerprint,
+        application_key: key
+      })
+    )
+
+    File.chmod!(creds_path, 0o600)
+    {info, key}
+  end
+
+{:ok, client} = Hue.from_bridge(bridge_info, application_key: application_key)
+{:ok, _} = Kino.start_child({Hue.Bridge, name: HuePanel, client: client})
+
+Enum.reduce_while(1..50, nil, fn _, _ ->
+  case Hue.Bridge.status(HuePanel) do
+    :live ->
+      {:halt, :live}
+
+    status ->
+      Process.sleep(200)
+      {:cont, status}
+  end
+end)
+|> case do
+  :live -> :live
+  status -> raise "bridge did not reach :live within 10s, last status: #{inspect(status)}"
+end
+```
+
+## Helpers
+
+`Panel` renders every dynamic region from the cache. Controls call
+`Panel.report/2` with their outcome; the event router calls the `render_*`
+functions when the cache changes.
+
+```elixir
+defmodule Panel do
+  @bridge HuePanel
+
+  # -- status line ---------------------------------------------------------
+
+  def report(ui, text) do
+    Kino.Frame.render(ui.status, Kino.Markdown.new("**#{text}**"))
+  end
+
+  def report_result(ui, label, :ok), do: report(ui, "#{label} ✓")
+
+  def report_result(ui, label, {:error, %Hue.Error{reason: reason}}),
+    do: report(ui, "#{label} — #{reason}")
+
+  def report_result(ui, label, {:error, other}),
+    do: report(ui, "#{label} — #{inspect(other)}")
+
+  # -- naming --------------------------------------------------------------
+
+  def name(type, rid), do: Hue.Bridge.name_of(@bridge, type, rid) || rid
+
+  # -- the lights a room's devices carry -----------------------------------
+
+  def lights_in_room(room) do
+    for %{"rid" => device_rid, "rtype" => "device"} <- room["children"] || [],
+        {:ok, device} = Hue.Bridge.fetch(@bridge, :device, device_rid),
+        %{"rid" => light_rid, "rtype" => "light"} <- device["services"] || [],
+        {:ok, light} = Hue.Bridge.fetch(@bridge, :light, light_rid),
+        do: light
+  end
+
+  # -- activity ------------------------------------------------------------
+
+  @activity_cap 50
+
+  def describe(%Hue.Event{type: t, resource_type: rt, rid: rid, data: data}) do
+    what =
+      cond do
+        get_in(data, ["on", "on"]) == true -> "on"
+        get_in(data, ["on", "on"]) == false -> "off"
+        get_in(data, ["dimming", "brightness"]) -> "#{round(get_in(data, ["dimming", "brightness"]))}%"
+        get_in(data, ["metadata", "name"]) -> "renamed to #{get_in(data, ["metadata", "name"])}"
+        true -> to_string(t)
+      end
+
+    "`#{rt}` **#{name(rt, rid)}** — #{what}"
+  end
+
+  def render_activity(ui, history) do
+    lines = history |> Enum.take(@activity_cap) |> Enum.join("\n\n")
+    Kino.Frame.render(ui.activity, Kino.Markdown.new(lines))
+  end
+end
+```
+
+## Event router
+
+```elixir
+ui = %{
+  status: Kino.Frame.new(placeholder: false),
+  rooms: Kino.Frame.new(),
+  light_state: Kino.Frame.new(placeholder: false),
+  scenes: Kino.Frame.new(),
+  activity: Kino.Frame.new()
+}
+
+{:ok, _router} =
+  Kino.start_child(
+    {Task,
+     fn ->
+       :ok = Hue.Bridge.subscribe(HuePanel)
+
+       Stream.repeatedly(fn -> receive do: ({:hue, e} -> e) end)
+       |> Enum.reduce([], fn event, history ->
+         history = [Panel.describe(event), history] |> List.flatten()
+         Panel.render_activity(ui, history)
+         history
+       end)
+     end}
+  )
+
+:ok
+```
+
+## Panel
+
+```elixir
+Kino.Layout.tabs([
+  {"Activity", ui.activity}
+])
+|> then(&Kino.Layout.grid([ui.status, &1], columns: 1))
+```
