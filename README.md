@@ -18,15 +18,7 @@ does, and the moduledoc says so.
 
 ```elixir
 def deps do
-  [{:hue, "~> 0.1"}]
-end
-```
-
-**This is not on Hex yet.** Until it is, depend on the tag:
-
-```elixir
-def deps do
-  [{:hue, github: "ShawnMcCool/hue-ex", tag: "v0.1.0"}]
+  [{:hue, "~> 0.2"}]
 end
 ```
 
