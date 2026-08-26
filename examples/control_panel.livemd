@@ -127,8 +127,9 @@ defmodule Panel do
   end
 
   def render_activity(ui, history) do
-    lines = history |> Enum.take(@activity_cap) |> Enum.join("\n\n")
-    Kino.Frame.render(ui.activity, Kino.Markdown.new(lines))
+    history = Enum.take(history, @activity_cap)
+    Kino.Frame.render(ui.activity, Kino.Markdown.new(Enum.join(history, "\n\n")))
+    history
   end
 end
 ```
@@ -152,9 +153,9 @@ ui = %{
 
        Stream.repeatedly(fn -> receive do: ({:hue, e} -> e) end)
        |> Enum.reduce([], fn event, history ->
-         history = [Panel.describe(event), history] |> List.flatten()
-         Panel.render_activity(ui, history)
-         history
+         [Panel.describe(event), history]
+         |> List.flatten()
+         |> then(&Panel.render_activity(ui, &1))
        end)
      end}
   )
