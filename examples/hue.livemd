@@ -1,0 +1,96 @@
+# Controlling Philips Hue
+
+```elixir
+Mix.install([
+  {:hue, "~> 0.2"},
+  {:kino, "~> 0.19"}
+])
+```
+
+## What this notebook does
+
+This is the [hue](https://hexdocs.pm/hue) library's worked example: it finds
+your bridge, pairs with it, controls lights by name, and watches state
+changes stream in live. Run it top to bottom against a real bridge on your
+network.
+
+The first run pairs — you'll press the bridge's round link button once. The
+result is saved beside this notebook, so every later run reconnects without
+asking.
+
+## Saved credentials
+
+An application key is a password. This cell keeps it out of the notebook
+file itself, in `.hue.json` next to the notebook (gitignored in the hue
+repository). Delete that file to start over from discovery.
+
+```elixir
+creds_path = Path.join(__DIR__, ".hue.json")
+
+saved =
+  case File.read(creds_path) do
+    {:ok, json} -> Jason.decode!(json)
+    {:error, :enoent} -> nil
+  end
+
+if saved, do: :reconnecting, else: :first_run
+```
+
+## Find the bridge
+
+`Hue.Discovery.discover/1` runs mDNS and Philips' cloud endpoint in
+parallel, then verifies each candidate with a real connection and pins the
+certificate it finds — the SSH host-key model, because a Hue bridge's
+certificate can't be verified any conventional way. The pin rides along in
+the returned `Hue.Bridge.Info` and every later connection checks against it.
+
+On a re-run this cell rebuilds that `Info` from the saved file instead.
+
+```elixir
+bridge_info =
+  if saved do
+    %Hue.Bridge.Info{
+      host: saved["host"],
+      port: saved["port"],
+      bridge_id: saved["bridge_id"],
+      fingerprint: saved["fingerprint"]
+    }
+  else
+    {:ok, [first | _]} = Hue.Discovery.discover()
+    first
+  end
+```
+
+## Pair
+
+**Press the round link button on your bridge, then run this cell** — the
+bridge only honours pairing requests for about thirty seconds after a
+press, and this cell polls for up to a minute, so either order works if
+you're quick.
+
+On a re-run, the saved key is used and nothing is sent to the bridge.
+
+```elixir
+application_key =
+  if saved do
+    saved["application_key"]
+  else
+    {:ok, %{application_key: key}} =
+      Hue.Pairing.pair_when_pressed(bridge_info, app: "livebook")
+
+    File.write!(
+      creds_path,
+      Jason.encode!(%{
+        host: bridge_info.host,
+        port: bridge_info.port,
+        bridge_id: bridge_info.bridge_id,
+        fingerprint: bridge_info.fingerprint,
+        application_key: key
+      })
+    )
+
+    key
+  end
+
+:paired
+```
