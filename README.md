@@ -26,7 +26,9 @@ certificate-pinned, and gamut-correct.
   and write emits a `:telemetry` event.
 - **Measured, not assumed** — the protocol behaviour this library implements
   was measured against a real BSB002 bridge running firmware `1.78.0`, not
-  read off a documentation page.
+  read off a documentation page. Where a measurement contradicted the
+  documentation, the measurement is what the code does, and the moduledoc
+  says so.
 
 ## Livebooks
 
