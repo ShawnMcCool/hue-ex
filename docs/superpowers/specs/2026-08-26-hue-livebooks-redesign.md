@@ -132,11 +132,48 @@ So a search is triggered by an `update` with
 `"ready"` while searching. The live observation of a joining bulb remains to
 be run with the user.
 
-## Panel structure design session
+## Panel structure (designed with the user after phase 0; approved)
 
-After phase 0, the panel's structure — tab composition, control grouping,
-what "Run all" reveals first — gets its own design pass with the user before
-implementation. Deliberately not designed here.
+**Composition.** Sections hold the code (Connect · Helpers · Panel); the
+final cell renders one `Kino.Layout.tabs` output — Rooms | Lights | Scenes |
+Management | Activity. App settings are declared so the notebook deploys as
+a Livebook app: full-screen UI, no visible code.
+
+**Rooms** — the home surface. One row per room and zone, all visible at once
+(homes have few rooms): name, live aggregate from `grouped_light`, On and
+Off buttons, brightness slider. Zones follow rooms, visually identical. A
+room with no `grouped_light` renders disabled with "no lights".
+
+**Lights** — a picker plus one control cluster (homes have many lights):
+select light → on/off, brightness, colour picker, colour-temperature slider,
+transition input, live state line (on, brightness, xy/mirek, reachable).
+Blink-to-identify lives here, not in Management — it is used while picking.
+
+**Scenes** — recall buttons grouped by room, plus a per-room "save current
+state as scene" form, since scenes are room-owned. Scene delete stays in
+Management behind its gate.
+
+**Management** — sub-tabs: Rename (type → resource → name form) · Rooms &
+zones (create with name/archetype; membership add/remove-one-at-a-time
+against a live members list; a note that moving a device rewrites the old
+room's scenes) · Devices (search trigger with `zigbee_device_discovery`
+status; delete behind type-the-name) · Delete (scenes, rooms, zones behind
+confirm clicks).
+
+**Activity** — the event feed, newest first, human phrasing, capped at the
+last ~50 events.
+
+**Live-sync.** One subscriber task; per-tab `Kino.Frame`s. Controls are
+created once per topology; state lives in frames; an event re-renders the
+affected state frame from the cache. Topology events (add/delete of rooms,
+lights, scenes) rebuild the affected tab's controls — accepted listener
+churn on rare events, never on state events. Writes go through layer 2 and
+the UI never optimistically updates: it shows what the eventstream confirms,
+making the library's write architecture visible.
+
+**Error visibility.** Every control's result lands in a status line at the
+top of the panel ("Kitchen → off" / "Desk Lamp: not dimmable"). A rejected
+write is never silent.
 
 ## README restructure
 
