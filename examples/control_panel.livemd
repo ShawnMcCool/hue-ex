@@ -2,11 +2,6 @@
 
 # Hue Control Panel
 
-Deploy as a Livebook app (the app icon in the sidebar) to run everything and
-see only the panel. In the editor, press `e a` to run all — every cell is
-required. Credentials are shared with the walkthrough, in your user config
-directory; first run pairs — press the link button when asked.
-
 ```elixir
 Mix.install([
   {:hue, "~> 0.2"},
@@ -16,9 +11,13 @@ Mix.install([
 
 ## Setup & Connect
 
-Credentials load from your platform's user config directory (shared with
-the walkthrough — see its "Saved credentials" section for the per-platform
-path); first run discovers the bridge and pairs — press the round link
+Deploy as a Livebook app (the app icon in the sidebar) to run everything
+and see only the panel. In the editor, press `e a` to run all — every cell
+is required.
+
+Credentials load from your platform's user config directory, shared with
+the walkthrough (its "Saved credentials" section lists the per-platform
+paths). First run discovers the bridge and pairs — press the round link
 button when asked.
 
 ```elixir
