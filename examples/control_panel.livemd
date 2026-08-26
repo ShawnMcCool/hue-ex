@@ -103,9 +103,9 @@ defmodule Panel do
 
   def lights_in_room(room) do
     for %{"rid" => device_rid, "rtype" => "device"} <- room["children"] || [],
-        {:ok, device} = Hue.Bridge.fetch(@bridge, :device, device_rid),
+        {:ok, device} <- [Hue.Bridge.fetch(@bridge, :device, device_rid)],
         %{"rid" => light_rid, "rtype" => "light"} <- device["services"] || [],
-        {:ok, light} = Hue.Bridge.fetch(@bridge, :light, light_rid),
+        {:ok, light} <- [Hue.Bridge.fetch(@bridge, :light, light_rid)],
         do: light
   end
 

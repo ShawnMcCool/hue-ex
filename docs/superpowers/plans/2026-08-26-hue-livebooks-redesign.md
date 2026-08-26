@@ -170,9 +170,9 @@ defmodule Panel do
 
   def lights_in_room(room) do
     for %{"rid" => device_rid, "rtype" => "device"} <- room["children"] || [],
-        {:ok, device} = Hue.Bridge.fetch(@bridge, :device, device_rid),
+        {:ok, device} <- [Hue.Bridge.fetch(@bridge, :device, device_rid)],
         %{"rid" => light_rid, "rtype" => "light"} <- device["services"] || [],
-        {:ok, light} = Hue.Bridge.fetch(@bridge, :light, light_rid),
+        {:ok, light} <- [Hue.Bridge.fetch(@bridge, :light, light_rid)],
         do: light
   end
 
@@ -244,7 +244,7 @@ Later tasks extend `Panel`, add tab sections between "Event router" and
 "Panel", and grow the tabs list. The router's `reduce` gains render calls
 per event type as tabs land (Task 3 adds the dispatch shown there).
 
-- [ ] **Step 2: Proofread** — every hue call against `lib/` (`Hue.Bridge.fetch/3` returns `{:ok, map} | {:error, _}` — the `lights_in_room` comprehension matches `{:ok, x}` in a generator, which *filters* rather than crashes on a miss; confirm that is the wanted behavior and it is: a missing device mid-topology-change should drop out, not crash the renderer). Every Kino call against hexdocs 0.19, especially `Kino.Frame.new/1` options, `Kino.Frame.render/2`, `Kino.Layout.tabs/1` tab-list shape, and the app-settings metadata line. `receive do: ({:hue, e} -> e)` — verify this one-liner form parses; if not, use the block form.
+- [ ] **Step 2: Proofread** — every hue call against `lib/` (`Hue.Bridge.fetch/3` returns `{:ok, map} | {:error, _}` — the `lights_in_room` comprehension matches `{:ok, x}` against a *singleton-list generator* (`{:ok, x} <- [fetch(...)]`), which filters rather than crashes on a miss; a plain `{:ok, x} = fetch(...)` match would instead raise `MatchError` on `{:error, _}`, so the `<-`-over-a-list idiom is load-bearing, not stylistic. Confirm the filtering behavior is wanted and it is: a missing device mid-topology-change should drop out, not crash the renderer). Every Kino call against hexdocs 0.19, especially `Kino.Frame.new/1` options, `Kino.Frame.render/2`, `Kino.Layout.tabs/1` tab-list shape, and the app-settings metadata line. `receive do: ({:hue, e} -> e)` — verify this one-liner form parses; if not, use the block form.
 
 - [ ] **Step 3: Commit** — `Begin the control panel: connect, router, activity`
 
