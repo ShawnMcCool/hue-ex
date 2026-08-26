@@ -106,6 +106,24 @@ renamed, and deleted through layer 1 while a `Hue.Bridge` watched:
 - An empty room answers `Hue.Room.set/3` with
   `{:error, %Hue.Error{reason: :no_grouped_light}}`, as documented.
 
+**Experiment 2 (device move) — passed: the bridge auto-moves.** Measured
+with the user-nominated "overhead" device (Kitchen). Writing the device into
+a second room's `children` returns `:ok` and the bridge removes it from
+Kitchen in the same stroke — no rejection, no explicit removal step. A move
+in the panel is therefore a single write to the destination room. Two
+side effects the management tab's prose must own:
+
+- The old room's **scenes are rewritten by the bridge** — seven `update
+  :scene` events arrived as Kitchen's scenes dropped the departed light's
+  actions. Moving a device out of a room edits that room's scenes.
+- A room that gains its first light **gains a `grouped_light` service**, as
+  an `add :grouped_light` event — `:no_grouped_light` is a state a room
+  leaves the moment a light arrives, not a permanent property.
+
+The cache tracked all of it correctly (both rooms' children, the new
+`grouped_light`), and restoring the original membership put Kitchen back
+byte-for-byte. No library work needed.
+
 **Experiment 1 (`zigbee_device_discovery`) — read-only probe done.** The
 bridge exposes one singleton resource, owned by the bridge device:
 `%{"action" => %{"action_type_values" => ["search"]}, "status" => "ready"}`.
