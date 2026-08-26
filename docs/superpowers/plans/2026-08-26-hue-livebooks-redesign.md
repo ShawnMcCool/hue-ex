@@ -288,7 +288,7 @@ adds the dispatch shown there).
     end
   end
 
-  def render_group_states(ui, group_frames) do
+  def render_group_states(group_frames) do
     for {{type, rid}, frame} <- group_frames do
       case Hue.Bridge.fetch(@bridge, type, rid) do
         {:ok, group} ->
@@ -358,7 +358,7 @@ room_rows =
   end
 
 Kino.Frame.render(ui.rooms, Kino.Layout.grid(room_rows, columns: 1))
-Panel.render_group_states(ui, group_frames)
+Panel.render_group_states(group_frames)
 ```
 ````
 
@@ -371,7 +371,7 @@ Panel.render_group_states(ui, group_frames)
          history = [Panel.describe(event) | history] |> then(&Panel.render_activity(ui, &1))
 
          if event.resource_type in [:grouped_light, :room, :zone],
-           do: Panel.render_group_states(ui, group_frames)
+           do: Panel.render_group_states(group_frames)
 
          history
 ```

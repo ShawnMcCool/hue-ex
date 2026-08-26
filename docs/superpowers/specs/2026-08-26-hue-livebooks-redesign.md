@@ -142,7 +142,11 @@ a Livebook app: full-screen UI, no visible code.
 **Rooms** — the home surface. One row per room and zone, all visible at once
 (homes have few rooms): name, live aggregate from `grouped_light`, On and
 Off buttons, brightness slider. Zones follow rooms, visually identical. A
-room with no `grouped_light` renders disabled with "no lights".
+room with no `grouped_light` shows "no lights" as its state. Its controls
+stay active rather than disabled — controls are built once, so a disabled
+row could never wake when a light arrives, and phase 0 measured that a room
+gaining its first light gains a `grouped_light` in the same stroke; until
+then a write fails visibly in the status line.
 
 **Lights** — a picker plus one control cluster (homes have many lights):
 select light → on/off, brightness, colour picker, colour-temperature slider,
