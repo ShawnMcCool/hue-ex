@@ -88,6 +88,32 @@ trusting documentation:
 Findings land in this spec. Anything the library handles badly (a cache gap,
 an unrecognised event type) becomes library work before panel work.
 
+### Findings
+
+**Experiment 3 (grouping lifecycle) — passed, no library work needed.**
+Measured 2026-08-26 against the reference bridge, via an empty room created,
+renamed, and deleted through layer 1 while a `Hue.Bridge` watched:
+
+- `create` answers `{:ok, [%{"rid" => ..., "rtype" => "room"}]}` and produces
+  an `add :room` event carrying the full resource. The cache resolves the new
+  room by name immediately. Creation fans out: `grouped_light` (group 0) and
+  `bridge_home` also emit updates.
+- A rename's `update :room` event carries only the metadata delta. The cache
+  drops the old name and resolves the new one — `:not_found` under the old
+  name, correct rid under the new.
+- `delete` emits `delete :room`; the cache forgets both the name and the rid.
+  No stale entries.
+- An empty room answers `Hue.Room.set/3` with
+  `{:error, %Hue.Error{reason: :no_grouped_light}}`, as documented.
+
+**Experiment 1 (`zigbee_device_discovery`) — read-only probe done.** The
+bridge exposes one singleton resource, owned by the bridge device:
+`%{"action" => %{"action_type_values" => ["search"]}, "status" => "ready"}`.
+So a search is triggered by an `update` with
+`%{"action" => %{"action_type" => "search"}}`, and `status` should move off
+`"ready"` while searching. The live observation of a joining bulb remains to
+be run with the user.
+
 ## Panel structure design session
 
 After phase 0, the panel's structure — tab composition, control grouping,
