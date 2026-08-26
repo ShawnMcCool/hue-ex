@@ -11,8 +11,7 @@ certificate-pinned, and gamut-correct.
   blocking retry loop.
 - **Certificate pinning** — trust-on-first-use; every connection after the
   first is verified against the pinned fingerprint.
-- **Generic CRUD** — every CLIP v2 resource type goes through `Hue.Resource`,
-  so nothing is ever blocked on a missing wrapper.
+- **Generic CRUD** — every CLIP v2 resource type goes through `Hue.Resource`.
 - **Lazy eventstream** — `Hue.Events.stream/2` is a lazy `Enumerable` that
   starts no process of its own.
 - **Live bridge model** — `Hue.Bridge` answers reads from ETS, addresses
@@ -24,13 +23,13 @@ certificate-pinned, and gamut-correct.
   light's own gamut.
 - **Telemetry** — every request, pairing attempt, sync, stream transition,
   and write emits a `:telemetry` event.
-- **Measured, not assumed** — the protocol behaviour this library implements
-  was measured against a real BSB002 bridge running firmware `1.78.0`, not
-  read off a documentation page. Where a measurement contradicted the
-  documentation, the measurement is what the code does, and the moduledoc
-  says so.
+- **Measured, not assumed** — measured against a real BSB002 bridge on
+  firmware `1.78.0`; where measurement contradicted the documentation, the
+  code follows the measurement.
 
 ## Livebooks
+
+Run both notebooks locally:
 
 ```
 mix escript.install hex livebook
@@ -39,19 +38,23 @@ curl -fsSLO https://raw.githubusercontent.com/ShawnMcCool/hue-ex/main/examples/c
 livebook server walkthrough.livemd
 ```
 
+`mix escript.install` places the binary in `~/.mix/escripts`; add that to
+your PATH if the `livebook` command is missing.
+
 [`examples/walkthrough.livemd`](examples/walkthrough.livemd) is the API
 journey — discover, pair, control lights by name, watch events stream in —
 as live documentation.
+
+[![Run in Livebook](https://livebook.dev/badge/v1/blue.svg)](https://livebook.dev/run?url=https%3A%2F%2Fraw.githubusercontent.com%2FShawnMcCool%2Fhue-ex%2Fmain%2Fexamples%2Fwalkthrough.livemd)
 
 [`examples/control_panel.livemd`](examples/control_panel.livemd) is a full
 interface to the bridge: rooms, lights, scenes, management, a live event
 feed. Deployable as a Livebook app.
 
+[![Run in Livebook](https://livebook.dev/badge/v1/blue.svg)](https://livebook.dev/run?url=https%3A%2F%2Fraw.githubusercontent.com%2FShawnMcCool%2Fhue-ex%2Fmain%2Fexamples%2Fcontrol_panel.livemd)
+
 They share one pairing: `.hue.json`, saved beside them by whichever notebook
 runs first.
-
-[![Run in Livebook](https://livebook.dev/badge/v1/blue.svg)](https://livebook.dev/run?url=https%3A%2F%2Fraw.githubusercontent.com%2FShawnMcCool%2Fhue-ex%2Fmain%2Fexamples%2Fwalkthrough.livemd)
-[![Run in Livebook](https://livebook.dev/badge/v1/blue.svg)](https://livebook.dev/run?url=https%3A%2F%2Fraw.githubusercontent.com%2FShawnMcCool%2Fhue-ex%2Fmain%2Fexamples%2Fcontrol_panel.livemd)
 
 Cloning the repo and opening `examples/` works too.
 
@@ -188,18 +191,6 @@ Targets are names or rids, interchangeably. `Hue.Light`, `Hue.Room`,
 `Hue.Bridge.write/4` and `Hue.Resource` remain available underneath for
 anything not wrapped.
 
-Neither layer starts anything you did not ask for.
-
-What this library deliberately does not do:
-
-- **No Entertainment streaming.** The DTLS-based low-latency protocol is out
-  of scope. Pairing does request `generateclientkey: true` and hands you the
-  `clientkey`, so adding Entertainment later stays additive and nobody has to
-  re-pair to get a key they were never given.
-- **No configuration system beyond `Hue.Bridge`'s own options.** `Hue.Client`
-  wraps a `Req.Request`, so your timeouts, your retry policy, and your test
-  stubs are configured the way you already configure Req.
-
 ### Reads do not touch the process
 
 `Hue.Light.get/2` is an `:ets.lookup` in your process. It does not message the
@@ -237,7 +228,7 @@ Filtering happens at the registry. A process waiting on button presses is not
 woken when a scene changes nineteen lights. Subscribe with no filter for
 everything, or with `name:` / `rid:` for one resource.
 
-### The failure that is silent
+### The silent failure
 
 A dead eventstream does not announce itself. Every read keeps answering, and
 every answer is quietly stale — the bridge sends no keepalive, so an idle stream
@@ -246,6 +237,16 @@ it at the transport layer and reconnects with backoff, refetching the full state
 each time rather than resuming from an event id.
 
 Attach to `[:hue, :stream, :disconnected]` if you want to know.
+
+### What this library deliberately does not do
+
+- **No Entertainment streaming.** The DTLS-based low-latency protocol is out
+  of scope. Pairing does request `generateclientkey: true` and hands you the
+  `clientkey`, so adding Entertainment later stays additive and nobody has to
+  re-pair to get a key they were never given.
+- **No configuration system beyond `Hue.Bridge`'s own options.** `Hue.Client`
+  wraps a `Req.Request`, so your timeouts, your retry policy, and your test
+  stubs are configured the way you already configure Req.
 
 ## Telemetry
 
@@ -265,11 +266,9 @@ Attach to `[:hue, :stream, :disconnected]` if you want to know.
 by the `Hue.Bridge` process for whichever bridge it concerns
 (`metadata.bridge` is the name you gave `Hue.Bridge`'s `:name` option).
 
-`[:hue, :stream, :disconnected]` is the one worth attaching to unconditionally.
-This library's characteristic failure mode is silent: a dropped eventstream
-leaves every read answering, and every answer quietly stale, because there is
-no keepalive to miss and reads never ask the process how current its data is.
-That event is the only thing that reveals it.
+`[:hue, :stream, :disconnected]` is the one worth attaching to unconditionally
+— see "The silent failure" above: that event is the only thing that reveals
+it.
 
 ## Trust model
 
@@ -285,10 +284,9 @@ that requires the same one. That is the SSH host-key model, and it has the same
 shape of guarantee:
 
 - **An attacker present during first contact is not detected.** Whatever answers
-  at that moment becomes the trusted certificate. Pair over a network you trust,
-  which for a home LAN and a bridge you just plugged in is a low bar, but it is a
-  bar. There is no getting around this — you cannot bootstrap trust out of
-  nothing.
+  at that moment becomes the trusted certificate. Pair over a network you trust
+  — a mild requirement for a home LAN, but a real one. There is no getting
+  around this — you cannot bootstrap trust out of nothing.
 - **Every interception after first contact is detected**, and fails closed with
   `{:error, %Hue.Error{reason: :certificate_changed}}`.
 
@@ -385,7 +383,7 @@ protocol-indistinguishable from a dead one. `stream/2` waits forever by default.
 You can set `receive_timeout: 30_000` and treat silence as death, and that is a
 reasonable policy — just know that it will sometimes fire on a perfectly healthy
 bridge that simply had nothing to say. No liveness policy over this protocol is
-correct; pick the way you prefer to be wrong.
+correct; both choices misfire in different cases.
 
 `Hue.Events.decode/1` and `decode_stream/1` decode bytes without opening
 anything, if you would rather own the connection yourself. Both handle a frame
