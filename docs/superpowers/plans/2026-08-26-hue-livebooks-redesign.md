@@ -475,7 +475,7 @@ controls =
       color: Kino.Input.color("Colour", default: "#ffd08a"),
       kelvin: Kino.Input.range("Kelvin", min: 2000, max: 6500, default: 2700),
       use_color: Kino.Input.checkbox("Set colour (else colour temperature)", default: true),
-      transition: Kino.Input.number("Transition ms", default: 400)
+      transition: Kino.Input.number("Transition ms", default: 400, min: 0)
     ],
     submit: "Apply"
   )
@@ -491,7 +491,8 @@ Kino.listen(controls, fn %{data: d} ->
   rid = Agent.get(selected_light, & &1)
 
   opts =
-    [on: d.on, brightness: d.brightness, transition: d.transition] ++
+    [on: d.on, brightness: d.brightness] ++
+      (if d.transition, do: [transition: round(d.transition)], else: []) ++
       if(d.use_color, do: [color: d.color], else: [kelvin: round(d.kelvin)])
 
   Panel.report_result(ui, "#{Panel.name(:light, rid)} → apply", Hue.Light.set(HuePanel, rid, opts))
@@ -522,7 +523,18 @@ lights_tab =
 
 - [ ] **Step 4: Tab** — `{"Lights", lights_tab}` after Rooms.
 
-- [ ] **Step 5: Proofread** — `Kino.Input.color/2` existence and default format ("#rrggbb" — must match `Hue.Color`'s hex input), `Kino.Input.number/2`, `{Agent, fun}` as a `Kino.start_child` child spec, `light["owner"]` shape against the fixture (`test/support/fixtures/full_state.json`), the CLIP v2 device-identify body (`{"identify":{"action":"identify"}}`) against the fixture's device resource or Hue's public API reference — if it cannot be confirmed from the repo, mark it for Task 8 hardware verification in your report and in this plan.
+- [ ] **Step 5: Proofread** — confirmed clean against kino 0.19.0 and `lib/`, one correction made (already folded into Step 2's code above):
+  - `Kino.Input.color/2` exists (`lib/kino/input.ex`); default `"#6583FF"`, value is always a `"#"`-prefixed hex string, never `nil`. `Hue.Color`'s `to_chromaticity/1` accepts exactly that shape (`"#" <> _`), and `Hue.Bridge.Body.validate_option!/1` accepts the same shape for `:color` — no adaptation needed.
+  - `Kino.Input.number/2` exists; value is a number **or `nil`** if the field is cleared (the docstring says so explicitly). `Hue.Bridge.Body`'s `:transition` validation requires a non-negative integer and raises `ArgumentError` otherwise — an uncaught raise inside a `Kino.listen` callback is swallowed by Kino's own `safe_apply` (logged, listener keeps running) rather than reported to `ui.status`, which would make a bad transition value a **silent** failure, violating "every control's outcome is reported." Fixed: the opts list omits `:transition` entirely when `d.transition` is `nil`, and only calls `round/1` (guarding the float-vs-integer case, same reasoning as `:kelvin`) when a value is present. Also added `min: 0` to the input itself as a UI-level nudge.
+  - `{Agent, fn -> ... end}` as a `Kino.start_child/1` child spec: confirmed valid. `Kino.start_child/1` calls `Supervisor.child_spec(child_spec, [])`, which for a `{module, arg}` tuple calls `module.child_spec(arg)`; `Agent.child_spec(fun)` (stdlib) returns `%{id: Agent, start: {Agent, :start_link, [fun]}}`, and `Kino.start_child/1` returns `{:ok, pid}` from `DynamicSupervisor.start_child/2` — so `{:ok, selected_light} = Kino.start_child(...)` binds `selected_light` to the agent's pid, and `Agent.get/2`/`Agent.update/2` work on it directly.
+  - `light["owner"]` shape confirmed against `test/support/fixtures/full_state.json`: every light resource carries `"owner" => %{"rid" => <device-rid>, "rtype" => "device"}` — matches `%{"rid" => device_rid} = light["owner"]` exactly.
+  - `Hue.Resource.type/1` knows `:device` — `"device"` is in `@resource_type_names` in `lib/hue/resource.ex`, and the fixture's device resources carry `"type": "device"`, `"services"` (list of `%{"rid", "rtype"}`), and an `"identify" => %{}` key (empty on read, as CLIP v2 documents for a write-only action field) — consistent with, but not proof of, the write body.
+  - The identify write body `%{"identify" => %{"action" => "identify"}}` is **unverifiable from this repo** — the fixture is a captured GET response, which never contains a write payload, and nothing else in `lib/` or `test/` touches `identify`. Kept as-is. Task 8 already carries the hardware-verification line for this ("blink's body was unverifiable from the repo — this is its test"), so no addition needed there.
+  - Apply handler's opts: `use_color` branch correctly picks `color:` vs `kelvin:`. `Hue.Bridge.Body` accepts `:kelvin` as `is_integer(value) and value > 0` (`lib/hue/bridge/body.ex`), clamped to the light's own mirek schema by `Hue.Color.mirek_for/2`; `Kino.Input.range/2` always emits a float (its own doc: "either float in the configured range"), so `round(d.kelvin)` is required, not decorative — same as the brightness float already accepted as-is since `:brightness` validation allows any number.
+  - `Hue.Light.set/3` with a rid target: confirmed — `set/3` calls `get(bridge, target)`, i.e. `Bridge.resolve(bridge, :light, target)`, the same resolution path Task 3 verified for rooms/zones (exact ETS lookup by rid before the name index).
+  - Binding order: the `## Lights` section sits after `## Rooms` and before `## Event router` in the notebook, so `ui`, `Panel`, and `client` (all bound in earlier cells) are in scope, and `selected_light` (bound in Lights) is in scope for the router's added dispatch clause.
+  - All 8 code cells syntax-checked with `Code.string_to_quoted!/1` — clean.
+  - Minor, unfixed, out of scope: `hd(light_options)` (both the Agent's initial value and the section's final `render_light_state` call) raises if the bridge reports zero lights. Every reference bridge fixture and every plausible install has at least one light, and Task 3's `groups` (rooms ++ zones) has the identical unguarded shape, so this is left consistent with that precedent rather than special-cased here.
 
 - [ ] **Step 6: Commit** — `Control panel: one light, fully driven`
 

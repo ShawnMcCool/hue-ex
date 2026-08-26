@@ -141,6 +141,34 @@ defmodule Panel do
     :ok
   end
 
+  # -- lights --------------------------------------------------------------
+
+  def light_state_line(rid) do
+    case Hue.Bridge.fetch(@bridge, :light, rid) do
+      {:ok, light} ->
+        on = if get_in(light, ["on", "on"]), do: "on", else: "off"
+        bri = get_in(light, ["dimming", "brightness"])
+        xy = get_in(light, ["color", "xy"])
+        mirek = get_in(light, ["color_temperature", "mirek"])
+
+        [
+          on,
+          bri && "#{round(bri)}%",
+          xy && "xy #{Float.round(xy["x"], 3)},#{Float.round(xy["y"], 3)}",
+          mirek && "#{mirek} mirek"
+        ]
+        |> Enum.reject(&is_nil/1)
+        |> Enum.join(" · ")
+
+      {:error, _} ->
+        "*(deleted)*"
+    end
+  end
+
+  def render_light_state(ui, rid) do
+    Kino.Frame.render(ui.light_state, Kino.Markdown.new(light_state_line(rid)))
+  end
+
   # -- activity ------------------------------------------------------------
 
   @activity_cap 50
@@ -232,6 +260,70 @@ Kino.Frame.render(ui.rooms, Kino.Layout.grid(room_rows, columns: 1))
 Panel.render_group_states(group_frames)
 ```
 
+## Lights
+
+One light at a time: pick it, watch its state, drive it. The picker's
+selection lives in an `Agent` so the router knows which light's state line
+to refresh when an event arrives for a light that isn't the one on screen.
+
+```elixir
+{:ok, lights} = Hue.Light.list(HuePanel)
+
+light_options =
+  lights
+  |> Enum.map(fn l -> {l["id"], Panel.name(:light, l["id"])} end)
+  |> Enum.sort_by(&elem(&1, 1))
+
+{:ok, selected_light} = Kino.start_child({Agent, fn -> elem(hd(light_options), 0) end})
+
+picker = Kino.Control.form([light: Kino.Input.select("Light", light_options)], report_changes: true)
+
+controls =
+  Kino.Control.form(
+    [
+      on: Kino.Input.checkbox("On", default: true),
+      brightness: Kino.Input.range("Brightness", min: 1, max: 100, default: 50),
+      color: Kino.Input.color("Colour", default: "#ffd08a"),
+      kelvin: Kino.Input.range("Kelvin", min: 2000, max: 6500, default: 2700),
+      use_color: Kino.Input.checkbox("Set colour (else colour temperature)", default: true),
+      transition: Kino.Input.number("Transition ms", default: 400, min: 0)
+    ],
+    submit: "Apply"
+  )
+
+blink = Kino.Control.button("Blink to identify")
+
+Kino.listen(picker, fn %{data: %{light: rid}} ->
+  Agent.update(selected_light, fn _ -> rid end)
+  Panel.render_light_state(ui, rid)
+end)
+
+Kino.listen(controls, fn %{data: d} ->
+  rid = Agent.get(selected_light, & &1)
+
+  opts =
+    [on: d.on, brightness: d.brightness] ++
+      (if d.transition, do: [transition: round(d.transition)], else: []) ++
+      if(d.use_color, do: [color: d.color], else: [kelvin: round(d.kelvin)])
+
+  Panel.report_result(ui, "#{Panel.name(:light, rid)} → apply", Hue.Light.set(HuePanel, rid, opts))
+end)
+
+Kino.listen(blink, fn _ ->
+  rid = Agent.get(selected_light, & &1)
+  {:ok, light} = Hue.Bridge.fetch(HuePanel, :light, rid)
+  %{"rid" => device_rid} = light["owner"]
+
+  result = Hue.Resource.update(client, :device, device_rid, %{"identify" => %{"action" => "identify"}})
+  Panel.report_result(ui, "#{Panel.name(:light, rid)} → blink", result)
+end)
+
+Panel.render_light_state(ui, elem(hd(light_options), 0))
+
+lights_tab =
+  Kino.Layout.grid([picker, ui.light_state, controls, blink], columns: 1)
+```
+
 ## Event router
 
 ```elixir
@@ -248,6 +340,9 @@ Panel.render_group_states(group_frames)
          if event.resource_type in [:grouped_light, :room, :zone],
            do: Panel.render_group_states(group_frames)
 
+         if event.resource_type == :light and event.rid == Agent.get(selected_light, & &1),
+           do: Panel.render_light_state(ui, event.rid)
+
          history
        end)
      end}
@@ -261,6 +356,7 @@ Panel.render_group_states(group_frames)
 ```elixir
 Kino.Layout.tabs([
   {"Rooms", ui.rooms},
+  {"Lights", lights_tab},
   {"Activity", ui.activity}
 ])
 |> then(&Kino.Layout.grid([ui.status, &1], columns: 1))
