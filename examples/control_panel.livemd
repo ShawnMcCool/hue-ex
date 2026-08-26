@@ -113,6 +113,34 @@ defmodule Panel do
         do: light
   end
 
+  # -- rooms ---------------------------------------------------------------
+
+  def group_state_line(type, group) do
+    case Hue.Bridge.grouped_light(@bridge, type, group["id"]) do
+      {:ok, gl} ->
+        on = if get_in(gl, ["on", "on"]), do: "on", else: "off"
+        bri = get_in(gl, ["dimming", "brightness"])
+        if bri, do: "#{on} · #{round(bri)}%", else: on
+
+      {:error, _} ->
+        "no lights"
+    end
+  end
+
+  def render_group_states(ui, group_frames) do
+    for {{type, rid}, frame} <- group_frames do
+      case Hue.Bridge.fetch(@bridge, type, rid) do
+        {:ok, group} ->
+          Kino.Frame.render(frame, Kino.Markdown.new(group_state_line(type, group)))
+
+        {:error, _} ->
+          Kino.Frame.render(frame, Kino.Markdown.new("*(deleted)*"))
+      end
+    end
+
+    :ok
+  end
+
   # -- activity ------------------------------------------------------------
 
   @activity_cap 50
@@ -142,8 +170,6 @@ defmodule Panel do
 end
 ```
 
-## Event router
-
 ```elixir
 ui = %{
   status: Kino.Frame.new(placeholder: false),
@@ -152,7 +178,63 @@ ui = %{
   scenes: Kino.Frame.new(),
   activity: Kino.Frame.new()
 }
+```
 
+## Rooms
+
+One row per room, then per zone: name, live state, On/Off, brightness.
+Controls are built once from the current topology; the small state frame in
+each row is what live-updates.
+
+```elixir
+{:ok, rooms} = Hue.Room.list(HuePanel)
+{:ok, zones} = Hue.Zone.list(HuePanel)
+
+groups =
+  Enum.map(rooms, &{:room, &1}) ++ Enum.map(zones, &{:zone, &1})
+
+group_frames =
+  Map.new(groups, fn {type, g} -> {{type, g["id"]}, Kino.Frame.new(placeholder: false)} end)
+
+set_group = fn
+  :room, target, opts -> Hue.Room.set(HuePanel, target, opts)
+  :zone, target, opts -> Hue.Zone.set(HuePanel, target, opts)
+end
+
+room_rows =
+  for {type, g} <- groups do
+    gname = get_in(g, ["metadata", "name"])
+    state_frame = group_frames[{type, g["id"]}]
+
+    on = Kino.Control.button("On")
+    off = Kino.Control.button("Off")
+    bri = Kino.Control.form([brightness: Kino.Input.range("", min: 1, max: 100, default: 50)], report_changes: true)
+
+    Kino.listen(on, fn _ ->
+      Panel.report_result(ui, "#{gname} → on", set_group.(type, g["id"], on: true))
+    end)
+
+    Kino.listen(off, fn _ ->
+      Panel.report_result(ui, "#{gname} → off", set_group.(type, g["id"], on: false))
+    end)
+
+    Kino.listen(bri, fn %{data: %{brightness: b}} ->
+      Panel.report_result(ui, "#{gname} → #{round(b)}%", set_group.(type, g["id"], brightness: b))
+    end)
+
+    Kino.Layout.grid(
+      [Kino.Markdown.new("**#{gname}**"), state_frame, on, off, bri],
+      columns: 5
+    )
+  end
+
+Kino.Frame.render(ui.rooms, Kino.Layout.grid(room_rows, columns: 1))
+Panel.render_group_states(ui, group_frames)
+```
+
+## Event router
+
+```elixir
 {:ok, _router} =
   Kino.start_child(
     {Task,
@@ -161,8 +243,12 @@ ui = %{
 
        Stream.repeatedly(fn -> receive do: ({:hue, e} -> e) end)
        |> Enum.reduce([], fn event, history ->
-         [Panel.describe(event) | history]
-         |> then(&Panel.render_activity(ui, &1))
+         history = [Panel.describe(event) | history] |> then(&Panel.render_activity(ui, &1))
+
+         if event.resource_type in [:grouped_light, :room, :zone],
+           do: Panel.render_group_states(ui, group_frames)
+
+         history
        end)
      end}
   )
@@ -174,6 +260,7 @@ ui = %{
 
 ```elixir
 Kino.Layout.tabs([
+  {"Rooms", ui.rooms},
   {"Activity", ui.activity}
 ])
 |> then(&Kino.Layout.grid([ui.status, &1], columns: 1))

@@ -209,8 +209,6 @@ defmodule Panel do
 end
 ```
 
-## Event router
-
 ```elixir
 ui = %{
   status: Kino.Frame.new(placeholder: false),
@@ -219,7 +217,11 @@ ui = %{
   scenes: Kino.Frame.new(),
   activity: Kino.Frame.new()
 }
+```
 
+## Event router
+
+```elixir
 {:ok, _router} =
   Kino.start_child(
     {Task,
@@ -247,9 +249,16 @@ Kino.Layout.tabs([
 ```
 ````
 
-Later tasks extend `Panel`, add tab sections between "Event router" and
-"Panel", and grow the tabs list. The router's `reduce` gains render calls
-per event type as tabs land (Task 3 adds the dispatch shown there).
+The `ui` map gets its own cell at the end of "Helpers", after the `Panel`
+module — not inside the router cell — because later tasks (Task 3 on) add a
+`## Rooms`-style section between "Helpers" and "Event router" that builds its
+own frames (e.g. `group_frames`) and needs `ui` already in scope; the router
+cell in turn needs those frames in scope, so it must come after them. Final
+cell order from Task 3 onward: Connect → Helpers (`Panel` module, then `ui`)
+→ Rooms → Event router → Panel. Later tasks extend `Panel`, add tab sections
+between the `ui` cell and "Event router", and grow the tabs list. The
+router's `reduce` gains render calls per event type as tabs land (Task 3
+adds the dispatch shown there).
 
 - [ ] **Step 2: Proofread** — every hue call against `lib/` (`Hue.Bridge.fetch/3` returns `{:ok, map} | {:error, _}` — the `lights_in_room` comprehension matches `{:ok, x}` against a *singleton-list generator* (`{:ok, x} <- [fetch(...)]`), which filters rather than crashes on a miss; a plain `{:ok, x} = fetch(...)` match would instead raise `MatchError` on `{:error, _}`, so the `<-`-over-a-list idiom is load-bearing, not stylistic. Confirm the filtering behavior is wanted and it is: a missing device mid-topology-change should drop out, not crash the renderer). Every Kino call against hexdocs 0.19, especially `Kino.Frame.new/1` options, `Kino.Frame.render/2`, `Kino.Layout.tabs/1` tab-list shape, and the app-settings metadata line. `receive do: ({:hue, e} -> e)` — verify this one-liner form parses; if not, use the block form.
 
@@ -294,7 +303,10 @@ per event type as tabs land (Task 3 adds the dispatch shown there).
   end
 ```
 
-- [ ] **Step 2: Add a `## Rooms` section** after "Event router":
+- [ ] **Step 2: Add a `## Rooms` section** between "Helpers" and "Event
+  router" — right after the `ui` cell, so the row controls built here can
+  close over `ui`, and so `group_frames` (built here) is in scope for the
+  router cell that follows:
 
 ````markdown
 ## Rooms
@@ -350,11 +362,13 @@ Panel.render_group_states(ui, group_frames)
 ```
 ````
 
-- [ ] **Step 3: Wire the router.** Replace the router cell's `reduce` body so grouped_light/room/zone events refresh states (and note `group_frames` must now be built **before** the router cell — move the Rooms section above "Event router", or split frame creation from control creation; choose the ordering that keeps each cell self-contained and record the choice in this plan):
+- [ ] **Step 3: Wire the router.** The Rooms section now sits above "Event
+  router" (Step 2), so `group_frames` is already in scope there. Replace the
+  router cell's `reduce` body so grouped_light/room/zone events refresh
+  states:
 
 ```elixir
-         history = [Panel.describe(event), history] |> List.flatten()
-         Panel.render_activity(ui, history)
+         history = [Panel.describe(event) | history] |> then(&Panel.render_activity(ui, &1))
 
          if event.resource_type in [:grouped_light, :room, :zone],
            do: Panel.render_group_states(ui, group_frames)
@@ -364,7 +378,36 @@ Panel.render_group_states(ui, group_frames)
 
 - [ ] **Step 4: Add the tab** — tabs list gains `{"Rooms", ui.rooms}` first.
 
-- [ ] **Step 5: Proofread** — `Hue.Bridge.grouped_light/3` (name-or-rid target? check its spec — it resolves via `Graph`; passing a rid must work, verify in `lib/hue/bridge.ex` and `lib/hue/bridge/graph.ex`), `report_changes: true` on `Kino.Control.form` (verify option name in hexdocs; the intent is slider events without a submit button — if a debounce option exists, use it), `Kino.Input.range` with empty-string label.
+- [ ] **Step 5: Proofread** — confirmed clean, no code changes needed:
+  - `Hue.Bridge.grouped_light/3` accepts a rid target with no adaptation.
+    `Bridge.grouped_light/3` delegates to `Graph.grouped_light/3`, which
+    calls `Graph.resolve/3`, which calls `Cache.fetch(table, type, target)`
+    first — an exact `:ets.lookup(table, {type, target})` — before ever
+    falling back to the name index. A rid matches that lookup directly.
+  - `Hue.Room.set/3` / `Hue.Zone.set/3` accept a rid target for the same
+    reason: both go through `Hue.Group.set/4`, which calls
+    `Bridge.grouped_light/3` with the target unchanged.
+  - `report_changes: true` is a real option on `Kino.Control.form/2` in kino
+    0.19 (`lib/kino/control.ex`): "Either `:submit` or `:report_changes`
+    must be specified," and setting it emits a `:change` event with the
+    field data on every input change, no submit button required. No
+    separate debounce option is needed at the form level —
+    `Kino.Input.range/2` already debounces at 250ms by default
+    (`lib/kino/input.ex`), which is the behavior wanted here.
+  - `Kino.Input.range(label, opts)` requires `is_binary(label)`; `""` is a
+    binary, so the empty label parses and matches every other input's
+    calling convention.
+  - `Kino.Control.button/1` events are `%{origin: ..., type: :click}`
+    (documented in `lib/kino/control.ex`); the plan's handlers ignore the
+    payload (`fn _ -> ...`), which is correct since only the fact of a click
+    matters.
+  - `Kino.listen/2` accepts a bare `%Kino.Control{}` directly (it implements
+    `Enumerable`), so `Kino.listen(on, fn _ -> ... end)` is valid without
+    wrapping in `Kino.Control.stream/1`.
+  - `Kino.Layout.grid(terms, columns: n)` (`lib/kino/layout.ex`) lays `terms`
+    into a grid with `n` columns; a 5-element list with `columns: 5` is one
+    row, and `columns: 1` on the list of rows stacks them one per line —
+    both call sites do what the section intends.
 
 - [ ] **Step 6: Commit** — `Control panel: the rooms surface`
 
