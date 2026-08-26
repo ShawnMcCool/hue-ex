@@ -305,73 +305,128 @@ adds the dispatch shown there).
 
 - [ ] **Step 2: Add a `## Rooms` section** between "Helpers" and "Event
   router" — right after the `ui` cell, so the row controls built here can
-  close over `ui`, and so `group_frames` (built here) is in scope for the
-  router cell that follows:
+  close over `ui`, and so `group_frames_ref` (built here) is in scope for the
+  router cell that follows.
+
+  **Revised during Task 6's review.** The original shape below built
+  `room_rows` once and bound `group_frames` as a plain cell-level variable.
+  Task 6's review caught that this violates the plan's own binding
+  convention stated up top — "Topology events (`:add`/`:delete` of room,
+  zone, light, scene, device) rebuild the affected tab's controls" — because
+  a room or zone created through Management never appeared on this tab
+  without re-running the cell. Fixed to the now-standard rebuild shape: an
+  `rebuild_rooms` zero-arg fn with its own terminate-first listener-pids
+  `Agent` (`room_listeners`, pids registered incrementally as each control
+  is created, not collected and stored in bulk at the end — a crash
+  partway through a rebuild must not leak the controls already created), and
+  a `group_frames_ref` `Agent` holding the current generation's frames so
+  the router's `render_group_states` call always reads the fresh set rather
+  than a `group_frames` binding captured before the last rebuild:
 
 ````markdown
 ## Rooms
 
-One row per room, then per zone: name, live state, On/Off, brightness.
-Controls are built once from the current topology; the small state frame in
-each row is what live-updates.
+One row per room, then per zone: name, live state, On/Off, brightness. The
+plan's own binding convention ("topology events rebuild the affected tab's
+controls") applies here too: a room or zone created through Management must
+show up on this tab without re-running the cell, so the rows are rebuilt —
+same terminate-first pattern as Scenes — whenever a room or zone is added or
+deleted; the small state frame in each row is what live-updates otherwise.
+`group_frames_ref` holds the current generation's frames so the router's
+`render_group_states` call always reads the fresh set, never a binding
+captured before the last rebuild.
 
 ```elixir
-{:ok, rooms} = Hue.Room.list(HuePanel)
-{:ok, zones} = Hue.Zone.list(HuePanel)
-
-groups =
-  Enum.map(rooms, &{:room, &1}) ++ Enum.map(zones, &{:zone, &1})
-
-group_frames =
-  Map.new(groups, fn {type, g} -> {{type, g["id"]}, Kino.Frame.new(placeholder: false)} end)
+{:ok, room_listeners} = Kino.start_child({Agent, fn -> [] end})
+{:ok, group_frames_ref} = Kino.start_child({Agent, fn -> %{} end})
 
 set_group = fn
   :room, target, opts -> Hue.Room.set(HuePanel, target, opts)
   :zone, target, opts -> Hue.Zone.set(HuePanel, target, opts)
 end
 
-room_rows =
-  for {type, g} <- groups do
-    gname = get_in(g, ["metadata", "name"])
-    state_frame = group_frames[{type, g["id"]}]
+rebuild_rooms = fn ->
+  Enum.each(Agent.get(room_listeners, & &1), &Kino.terminate_child/1)
+  Agent.update(room_listeners, fn _ -> [] end)
+  Agent.update(group_frames_ref, fn _ -> %{} end)
 
-    on = Kino.Control.button("On")
-    off = Kino.Control.button("Off")
-    bri = Kino.Control.form([brightness: Kino.Input.range("", min: 1, max: 100, default: 50)], report_changes: true)
+  register = fn pid -> Agent.update(room_listeners, &[pid | &1]) end
 
-    Kino.listen(on, fn _ ->
-      Panel.report_result(ui, "#{gname} → on", set_group.(type, g["id"], on: true))
-    end)
+  {:ok, rooms} = Hue.Room.list(HuePanel)
+  {:ok, zones} = Hue.Zone.list(HuePanel)
 
-    Kino.listen(off, fn _ ->
-      Panel.report_result(ui, "#{gname} → off", set_group.(type, g["id"], on: false))
-    end)
+  groups =
+    Enum.map(rooms, &{:room, &1}) ++ Enum.map(zones, &{:zone, &1})
 
-    Kino.listen(bri, fn %{data: %{brightness: b}} ->
-      Panel.report_result(ui, "#{gname} → #{round(b)}%", set_group.(type, g["id"], brightness: b))
-    end)
+  group_frames =
+    Map.new(groups, fn {type, g} -> {{type, g["id"]}, Kino.Frame.new(placeholder: false)} end)
 
-    Kino.Layout.grid(
-      [Kino.Markdown.new("**#{gname}**"), state_frame, on, off, bri],
-      columns: 5
-    )
-  end
+  room_rows =
+    for {type, g} <- groups do
+      gname = get_in(g, ["metadata", "name"])
+      state_frame = group_frames[{type, g["id"]}]
 
-Kino.Frame.render(ui.rooms, Kino.Layout.grid(room_rows, columns: 1))
-Panel.render_group_states(group_frames)
+      on = Kino.Control.button("On")
+      off = Kino.Control.button("Off")
+      bri = Kino.Control.form([brightness: Kino.Input.range("", min: 1, max: 100, default: 50)], report_changes: true)
+
+      register.(
+        Kino.listen(on, fn _ ->
+          Panel.report_result(ui, "#{gname} → on", set_group.(type, g["id"], on: true))
+        end)
+      )
+
+      register.(
+        Kino.listen(off, fn _ ->
+          Panel.report_result(ui, "#{gname} → off", set_group.(type, g["id"], on: false))
+        end)
+      )
+
+      register.(
+        Kino.listen(bri, fn %{data: %{brightness: b}} ->
+          Panel.report_result(ui, "#{gname} → #{round(b)}%", set_group.(type, g["id"], brightness: b))
+        end)
+      )
+
+      Kino.Layout.grid(
+        [Kino.Markdown.new("**#{gname}**"), state_frame, on, off, bri],
+        columns: 5
+      )
+    end
+
+  Kino.Frame.render(ui.rooms, Kino.Layout.grid(room_rows, columns: 1))
+  Agent.update(group_frames_ref, fn _ -> group_frames end)
+  Panel.render_group_states(group_frames)
+end
+
+rebuild_rooms.()
 ```
 ````
 
 - [ ] **Step 3: Wire the router.** The Rooms section now sits above "Event
-  router" (Step 2), so `group_frames` is already in scope there. Replace the
-  router cell's `reduce` body so grouped_light/room/zone events refresh
-  states:
+  router" (Step 2), so `rebuild_rooms` and `group_frames_ref` are already in
+  scope there. `rebuild_rooms.()` runs — wrapped in the same try/rescue +
+  `catch :exit` reporter as every other rebuild — on `:add`/`:delete` of
+  `:room`/`:zone`, *before* `render_group_states` so a brand-new room's
+  frame already exists by the time its state is read; `render_group_states`
+  itself now reads the current frames from `group_frames_ref` rather than
+  a plain variable:
 
 ```elixir
          history = [Panel.describe(event) | history] |> then(&Panel.render_activity(ui, &1))
 
+         if event.resource_type in [:room, :zone] and event.type in [:add, :delete] do
+           try do
+             rebuild_rooms.()
+           rescue
+             e -> Panel.report(ui, "rooms rebuild failed: #{Exception.message(e)}")
+           catch
+             :exit, reason -> Panel.report(ui, "rooms rebuild failed: #{inspect(reason)}")
+           end
+         end
+
          if event.resource_type in [:grouped_light, :room, :zone],
-           do: Panel.render_group_states(group_frames)
+           do: Panel.render_group_states(Agent.get(group_frames_ref, & &1))
 
          history
 ```
@@ -970,6 +1025,10 @@ end
 
 rebuild_management = fn ->
   Enum.each(Agent.get(management_listeners, & &1), &Kino.terminate_child/1)
+  Agent.update(management_listeners, fn _ -> [] end)
+  Agent.update(membership_refs, fn _ -> %{room: nil, zone: nil} end)
+
+  register = fn pid -> Agent.update(management_listeners, &[pid | &1]) end
 
   archetypes = ~w(bedroom downstairs garden kitchen living_room office toilet tv other)
 
@@ -1012,9 +1071,9 @@ rebuild_management = fn ->
       Enum.map(zones, &{"zone:#{&1["id"]}", "zone: #{get_in(&1, ["metadata", "name"])}"}) ++
       Enum.map(scenes, &{"scene:#{&1["id"]}", "scene: #{get_in(&1, ["metadata", "name"])}"})
 
-  {rename_pids, rename_block} =
+  rename_block =
     if rename_options == [] do
-      {[], Kino.Markdown.new("*(nothing to rename)*")}
+      Kino.Markdown.new("*(nothing to rename)*")
     else
       rename_form =
         Kino.Control.form(
@@ -1025,7 +1084,7 @@ rebuild_management = fn ->
           submit: "Apply"
         )
 
-      pid =
+      register.(
         Kino.listen(rename_form, fn %{data: %{resource: ref, name: new_name}} ->
           [type_str, rid] = String.split(ref, ":", parts: 2)
 
@@ -1040,8 +1099,9 @@ rebuild_management = fn ->
           result = Hue.Resource.update(client, type, rid, %{"metadata" => %{"name" => new_name}})
           Panel.report_result(ui, "rename to \"#{new_name}\"", result)
         end)
+      )
 
-      {[pid], Kino.Layout.grid([rename_form], columns: 1)}
+      Kino.Layout.grid([rename_form], columns: 1)
     end
 
   # ---- Rooms & zones: create ----
@@ -1056,7 +1116,7 @@ rebuild_management = fn ->
       submit: "Create"
     )
 
-  create_pid =
+  register.(
     Kino.listen(create_form, fn %{data: %{name: name, archetype: archetype, kind: kind}} ->
       type = if kind == "zone", do: :zone, else: :room
       body = %{"metadata" => %{"name" => name, "archetype" => archetype}, "children" => []}
@@ -1064,12 +1124,13 @@ rebuild_management = fn ->
       outcome = if match?({:ok, _}, result), do: :ok, else: result
       Panel.report_result(ui, "create #{kind} \"#{name}\"", outcome)
     end)
+  )
 
   # ---- Rooms & zones: room membership (devices) ----
 
-  {room_membership_pids, room_membership_block, room_ref} =
+  {room_membership_block, room_ref} =
     if room_options == [] or device_options == [] do
-      {[], Kino.Markdown.new("*(no rooms or no devices yet)*"), nil}
+      {Kino.Markdown.new("*(no rooms or no devices yet)*"), nil}
     else
       {:ok, room_membership_state} =
         Kino.start_child(
@@ -1079,24 +1140,28 @@ rebuild_management = fn ->
            end}
         )
 
+      register.(room_membership_state)
+
       room_group_select = Kino.Input.select("Room", room_options)
       room_device_select = Kino.Input.select("Device", device_options)
       room_members_frame = Kino.Frame.new(placeholder: false)
       room_add_button = Kino.Control.button("Add to room")
       room_remove_button = Kino.Control.button("Remove from room")
 
-      group_pid =
+      register.(
         Kino.listen(room_group_select, fn %{value: rid} ->
           Agent.update(room_membership_state, &Map.put(&1, :group, rid))
           render_members.(:room, rid, room_members_frame)
         end)
+      )
 
-      member_pid =
+      register.(
         Kino.listen(room_device_select, fn %{value: rid} ->
           Agent.update(room_membership_state, &Map.put(&1, :member, rid))
         end)
+      )
 
-      add_pid =
+      register.(
         Kino.listen(room_add_button, fn _ ->
           %{group: group_rid, member: member_rid} = Agent.get(room_membership_state, & &1)
 
@@ -1122,8 +1187,9 @@ rebuild_management = fn ->
             result
           )
         end)
+      )
 
-      remove_pid =
+      register.(
         Kino.listen(room_remove_button, fn _ ->
           %{group: group_rid, member: member_rid} = Agent.get(room_membership_state, & &1)
 
@@ -1143,6 +1209,7 @@ rebuild_management = fn ->
             result
           )
         end)
+      )
 
       render_members.(:room, elem(hd(room_options), 0), room_members_frame)
 
@@ -1152,15 +1219,14 @@ rebuild_management = fn ->
           columns: 1
         )
 
-      pids = [group_pid, member_pid, add_pid, remove_pid, room_membership_state]
-      {pids, block, %{state: room_membership_state, frame: room_members_frame}}
+      {block, %{state: room_membership_state, frame: room_members_frame}}
     end
 
   # ---- Rooms & zones: zone membership (lights) ----
 
-  {zone_membership_pids, zone_membership_block, zone_ref} =
+  {zone_membership_block, zone_ref} =
     if zone_options == [] or light_options == [] do
-      {[], Kino.Markdown.new("*(no zones or no lights yet)*"), nil}
+      {Kino.Markdown.new("*(no zones or no lights yet)*"), nil}
     else
       {:ok, zone_membership_state} =
         Kino.start_child(
@@ -1170,24 +1236,28 @@ rebuild_management = fn ->
            end}
         )
 
+      register.(zone_membership_state)
+
       zone_group_select = Kino.Input.select("Zone", zone_options)
       zone_light_select = Kino.Input.select("Light", light_options)
       zone_members_frame = Kino.Frame.new(placeholder: false)
       zone_add_button = Kino.Control.button("Add to zone")
       zone_remove_button = Kino.Control.button("Remove from zone")
 
-      group_pid =
+      register.(
         Kino.listen(zone_group_select, fn %{value: rid} ->
           Agent.update(zone_membership_state, &Map.put(&1, :group, rid))
           render_members.(:zone, rid, zone_members_frame)
         end)
+      )
 
-      member_pid =
+      register.(
         Kino.listen(zone_light_select, fn %{value: rid} ->
           Agent.update(zone_membership_state, &Map.put(&1, :member, rid))
         end)
+      )
 
-      add_pid =
+      register.(
         Kino.listen(zone_add_button, fn _ ->
           %{group: group_rid, member: member_rid} = Agent.get(zone_membership_state, & &1)
 
@@ -1213,8 +1283,9 @@ rebuild_management = fn ->
             result
           )
         end)
+      )
 
-      remove_pid =
+      register.(
         Kino.listen(zone_remove_button, fn _ ->
           %{group: group_rid, member: member_rid} = Agent.get(zone_membership_state, & &1)
 
@@ -1234,6 +1305,7 @@ rebuild_management = fn ->
             result
           )
         end)
+      )
 
       render_members.(:zone, elem(hd(zone_options), 0), zone_members_frame)
 
@@ -1243,8 +1315,7 @@ rebuild_management = fn ->
           columns: 1
         )
 
-      pids = [group_pid, member_pid, add_pid, remove_pid, zone_membership_state]
-      {pids, block, %{state: zone_membership_state, frame: zone_members_frame}}
+      {block, %{state: zone_membership_state, frame: zone_members_frame}}
     end
 
   rooms_zones_block =
@@ -1269,7 +1340,7 @@ rebuild_management = fn ->
 
   search_button = Kino.Control.button("Search for new devices")
 
-  search_pid =
+  register.(
     Kino.listen(search_button, fn _ ->
       result =
         case Hue.Resource.list(client, :zigbee_device_discovery) do
@@ -1287,14 +1358,15 @@ rebuild_management = fn ->
 
       Panel.report_result(ui, "search for new devices", result)
     end)
+  )
 
   Panel.render_device_status(ui)
 
   # ---- Devices: delete ----
 
-  {device_delete_pids, device_delete_block} =
+  device_delete_block =
     if device_options == [] do
-      {[], Kino.Markdown.new("*(no devices)*")}
+      Kino.Markdown.new("*(no devices)*")
     else
       device_delete_form =
         Kino.Control.form(
@@ -1305,7 +1377,7 @@ rebuild_management = fn ->
           submit: "Delete"
         )
 
-      pid =
+      register.(
         Kino.listen(device_delete_form, fn %{data: %{device: rid, confirm_name: typed}} ->
           case Hue.Bridge.fetch(HuePanel, :device, rid) do
             {:ok, device} ->
@@ -1325,8 +1397,9 @@ rebuild_management = fn ->
               Panel.report_result(ui, "delete device", err)
           end
         end)
+      )
 
-      {[pid], Kino.Layout.grid([device_delete_form], columns: 1)}
+      Kino.Layout.grid([device_delete_form], columns: 1)
     end
 
   devices_block =
@@ -1354,9 +1427,9 @@ rebuild_management = fn ->
       Enum.map(zones, &{"zone:#{&1["id"]}", "zone: #{get_in(&1, ["metadata", "name"])}"}) ++
       Enum.map(scenes, &{"scene:#{&1["id"]}", "scene: #{get_in(&1, ["metadata", "name"])}"})
 
-  {delete_pids, delete_block} =
+  delete_block =
     if delete_options == [] do
-      {[], Kino.Markdown.new("*(nothing to delete)*")}
+      Kino.Markdown.new("*(nothing to delete)*")
     else
       delete_form =
         Kino.Control.form(
@@ -1367,7 +1440,7 @@ rebuild_management = fn ->
           submit: "Delete"
         )
 
-      pid =
+      register.(
         Kino.listen(delete_form, fn %{data: %{resource: ref, confirm: confirmed}} ->
           [type_str, rid] = String.split(ref, ":", parts: 2)
 
@@ -1386,8 +1459,9 @@ rebuild_management = fn ->
             Panel.report(ui, "delete #{name} — refused, confirm not checked")
           end
         end)
+      )
 
-      {[pid], Kino.Layout.grid([delete_form], columns: 1)}
+      Kino.Layout.grid([delete_form], columns: 1)
     end
 
   management_tab =
@@ -1401,18 +1475,6 @@ rebuild_management = fn ->
   Kino.Frame.render(ui.management, management_tab)
 
   Agent.update(membership_refs, fn _ -> %{room: room_ref, zone: zone_ref} end)
-
-  Agent.update(management_listeners, fn _ ->
-    List.flatten([
-      rename_pids,
-      create_pid,
-      room_membership_pids,
-      zone_membership_pids,
-      search_pid,
-      device_delete_pids,
-      delete_pids
-    ])
-  end)
 end
 
 rebuild_management.()
@@ -1421,9 +1483,8 @@ rebuild_management.()
 - [x] **Step 3: Router** — after the `:scene` add/delete clause, add the
   management rebuild (try/rescue *and* `catch :exit` — this rebuild makes
   inter-process `Agent`/`Kino` calls a plain `rescue` would not catch if one
-  of them exits), the membership-frame refresh (unconditional on event
-  type — a membership edit arrives as `:update`, not `:add`/`:delete`), and
-  the device-status refresh:
+  of them exits), the membership-frame refresh, and the device-status
+  refresh:
 
 ```elixir
          if event.resource_type in [:room, :zone, :scene, :device, :light] and
@@ -1437,12 +1498,61 @@ rebuild_management.()
            end
          end
 
-         if event.resource_type in [:room, :zone],
-           do: refresh_membership.()
+         if event.resource_type in [:room, :zone] do
+           try do
+             refresh_membership.()
+           rescue
+             e -> Panel.report(ui, "membership refresh failed: #{Exception.message(e)}")
+           catch
+             :exit, reason -> Panel.report(ui, "membership refresh failed: #{inspect(reason)}")
+           end
+         end
 
          if event.resource_type == :zigbee_device_discovery,
            do: Panel.render_device_status(ui)
 ```
+
+  **Revised twice after the initial write, both times during review:**
+
+  1. `refresh_membership.()` was originally called bare (unconditional on
+     event type, no `try`/`rescue`). A review caught the failure mode this
+     left open: if `rebuild_management.()` itself raised partway through a
+     rebuild — say, mid-way through building the room membership editor —
+     `membership_refs` could be left pointing at a generation whose `Agent`s
+     and selects had already been torn down by the *next* successful
+     rebuild's terminate-first step, and the very next `:room`/`:zone`
+     event's bare `refresh_membership.()` would call `Agent.get/2` on a
+     dead pid and crash the whole router with `:noproc` — silently ending
+     live updates for every tab, not just Management. Two-part fix: (a)
+     `rebuild_management.()` now resets `membership_refs` to `%{room: nil,
+     zone: nil}` immediately after its terminate step (see Step 2's code),
+     so a dangling generation can never be dereferenced — a crash before the
+     end-of-rebuild update leaves the refs pointing at nothing, and
+     `refresh_membership.()`'s own `nil -> :ok` clauses turn that into a
+     no-op; (b) `refresh_membership.()` is now wrapped in the same
+     try/rescue + `catch :exit` shape as every rebuild, belt and braces,
+     since it still makes the same class of inter-process `Agent` calls.
+  2. `rebuild_management.()`'s pids were originally collected in local
+     variables per sub-tab and flattened into one `Agent.update` at the very
+     end. A review named the partial-generation leak this left open: a
+     crash anywhere before that final line meant every listener and `Agent`
+     already created in that rebuild attempt was never registered anywhere,
+     so the *next* successful rebuild's terminate-first step had no record
+     of them to kill — permanent leak, once per crashed rebuild, for the
+     rest of the session. Fixed by registering incrementally: `register =
+     fn pid -> Agent.update(management_listeners, &[pid | &1]) end`, called
+     immediately after every `Kino.listen`/`Kino.start_child` call (see
+     Step 2's code) rather than threading pids back out through tuple
+     returns. `management_listeners` is also reset to `[]` right after the
+     terminate step, for the same reason as `membership_refs` above.
+
+  The Rooms tab (Task 3) gained the identical rebuild/incremental-registration/
+  reset-after-terminate shape in the same pass, once the review traced the
+  underlying gap to the plan's own binding convention rather than to
+  Management specifically — see Task 3's revised Steps 2–3. Dispatch order
+  in the router matters here: `rebuild_rooms.()` runs before
+  `render_group_states`, so a brand-new room's frame exists by the time its
+  state is read from the fresh `group_frames_ref`.
 
 - [x] **Step 4: Tab** — `{"Management", ui.management}` between Scenes and
   Activity (a frame, not a raw `management_tab` variable — the frame is what
