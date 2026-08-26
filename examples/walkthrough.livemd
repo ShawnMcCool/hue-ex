@@ -201,7 +201,7 @@ malformed value raises, because that's a bug in the code, not a fact about
 the bulb.
 
 ```elixir
-light = "Credenza Lamp"
+light = "Desk Lamp"
 
 :ok = Hue.Light.set(LivebookHue, light, on: true, brightness: 40)
 ```
