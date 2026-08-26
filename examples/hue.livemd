@@ -178,3 +178,64 @@ Kino.Layout.grid(
   columns: 2
 )
 ```
+
+## Control, by name
+
+Pick one of your lights from the table above and use its name here. Writes
+accept `:on`, `:brightness` (percent), `:color` (hex, RGB tuple, or xy),
+`:kelvin`, and `:transition` (milliseconds). A capability the light doesn't
+have — colour on a white-only bulb — returns `{:error, %Hue.Error{}}`; a
+malformed value raises, because that's a bug in the code, not a fact about
+the bulb.
+
+```elixir
+light = "Desk Lamp"
+
+:ok = Hue.Light.set(LivebookHue, light, on: true, brightness: 40)
+```
+
+`set` returns when the write is accepted, not when the light has changed —
+writes are coalesced and paced so a burst never floods the bridge. When you
+need confirmation, `await: true` blocks until the confirming event comes
+back down the eventstream:
+
+```elixir
+Hue.Light.set(LivebookHue, light, color: "#ff8800", transition: 400, await: true)
+```
+
+Rooms, zones, and scenes work the same way — `Hue.Room.set/3`,
+`Hue.Zone.set/3`, `Hue.Scene.recall/3`:
+
+```elixir
+# :ok = Hue.Room.set(LivebookHue, "Living Room", on: false)
+# :ok = Hue.Scene.recall(LivebookHue, "Relax")
+:skipped
+```
+
+## A little control panel
+
+The example turns tool here: pick a light and drive it. This is nothing but
+the calls you just made, wired to a form.
+
+```elixir
+light_names =
+  lights
+  |> Enum.map(&Hue.Bridge.name_of(LivebookHue, :light, &1["id"]))
+  |> Enum.sort()
+
+form =
+  Kino.Control.form(
+    [
+      light: Kino.Input.select("Light", Enum.map(light_names, &{&1, &1})),
+      on: Kino.Input.checkbox("On", default: true),
+      brightness: Kino.Input.range("Brightness", min: 1, max: 100, default: 50)
+    ],
+    submit: "Apply"
+  )
+
+Kino.listen(form, fn %{data: data} ->
+  Hue.Light.set(LivebookHue, data.light, on: data.on, brightness: data.brightness)
+end)
+
+form
+```
