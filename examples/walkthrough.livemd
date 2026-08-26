@@ -236,8 +236,8 @@ pairing again.
 
 Subscribing delivers `{:hue, %Hue.Event{}}` to the calling process, and the
 subscription dies with that process — so the listener below is a supervised
-task that subscribes itself. Flip a light in the Hue app, or use the control
-panel above, and watch the deltas arrive. Notice a single change fans out:
+task that subscribes itself. Flip a light in the Hue app, or re-run the set
+calls above, and watch the deltas arrive. Notice a single change fans out:
 the bridge also recomputes group aggregates, so one light produces a
 `grouped_light` event too.
 
