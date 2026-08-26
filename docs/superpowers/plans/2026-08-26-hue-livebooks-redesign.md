@@ -691,10 +691,17 @@ long-lived router process, neither condition ever fires between rebuilds, so
 the old listener processes would otherwise accumulate for the life of the
 session. `scene_listeners` holds the pids `Kino.listen` returns so each
 rebuild can `Kino.terminate_child/1` the previous batch before starting the
-next. A click that lands in the narrow window while a rebuild is replacing
-its button can be dropped along with the listener that would have handled
-it; this is accepted rather than guarded against, since the reappearing row
-is itself the feedback that the click needs to be repeated.
+next. It is reset to `[]` immediately after that terminate step, and a
+`register` helper appends each new pid the instant `Kino.listen` returns it
+— the same shape Rooms and Management use — so a rebuild that raises
+partway through still leaves what it already built registered for the
+*next* rebuild's terminate-first step to clean up, rather than threading
+pids back out through tuple returns and storing them in one bulk update
+only if the whole rebuild finishes. A click that lands in the narrow window
+while a rebuild is replacing its button can be dropped along with the
+listener that would have handled it; this is accepted rather than guarded
+against, since the reappearing row is itself the feedback that the click
+needs to be repeated.
 
 Scene renames arrive as a plain `:update`, which does not trigger a rebuild,
 so a renamed scene's button keeps its old label until the next add or
@@ -716,6 +723,9 @@ end
 
 rebuild_scenes = fn ->
   Enum.each(Agent.get(scene_listeners, & &1), &Kino.terminate_child/1)
+  Agent.update(scene_listeners, fn _ -> [] end)
+
+  register = fn pid -> Agent.update(scene_listeners, &[pid | &1]) end
 
   {:ok, scenes} = Hue.Scene.list(HuePanel)
   {:ok, rooms} = Hue.Room.list(HuePanel)
@@ -727,48 +737,45 @@ rebuild_scenes = fn ->
     name = get_in(scene, ["metadata", "name"])
     button = Kino.Control.button("Recall")
 
-    pid =
+    register.(
       Kino.listen(button, fn _ ->
         Panel.report_result(ui, "recall #{name}", Hue.Scene.recall(HuePanel, scene["id"]))
       end)
+    )
 
-    {pid, Kino.Layout.grid([Kino.Markdown.new(name), button], columns: 2)}
+    Kino.Layout.grid([Kino.Markdown.new(name), button], columns: 2)
   end
 
   group_block = fn heading, group_scenes, save_room ->
-    {pids, rows} = group_scenes |> Enum.map(scene_row) |> Enum.unzip()
+    rows = Enum.map(group_scenes, scene_row)
 
     save_row =
       if save_room do
         form =
           Kino.Control.form([name: Kino.Input.text("New scene from current state")], submit: "Save")
 
-        form_pid =
+        register.(
           Kino.listen(form, fn %{data: %{name: name}} ->
             result = save_scene.(save_room, name)
             outcome = if match?({:ok, _}, result), do: :ok, else: result
             Panel.report_result(ui, "save \"#{name}\"", outcome)
           end)
+        )
 
-        [{form_pid, form}]
+        [form]
       else
         []
       end
 
-    {save_pids, save_rows} = Enum.unzip(save_row)
-
-    block =
-      Kino.Layout.grid([Kino.Markdown.new("**#{heading}**")] ++ rows ++ save_rows, columns: 1)
-
-    {pids ++ save_pids, block}
+    Kino.Layout.grid([Kino.Markdown.new("**#{heading}**")] ++ rows ++ save_row, columns: 1)
   end
 
-  room_results =
+  room_blocks =
     for room <- rooms do
       group_block.(get_in(room, ["metadata", "name"]), Map.get(by_group, room["id"], []), room)
     end
 
-  leftover_results =
+  leftover_blocks =
     for {group_rid, group_scenes} <- by_group, not MapSet.member?(room_ids, group_rid) do
       %{"rtype" => rtype} = hd(group_scenes)["group"]
 
@@ -783,10 +790,7 @@ rebuild_scenes = fn ->
       group_block.(heading, group_scenes, nil)
     end
 
-  {pid_lists, blocks} = Enum.unzip(room_results ++ leftover_results)
-
-  Kino.Frame.render(ui.scenes, Kino.Layout.grid(blocks, columns: 1))
-  Agent.update(scene_listeners, fn _ -> List.flatten(pid_lists) end)
+  Kino.Frame.render(ui.scenes, Kino.Layout.grid(room_blocks ++ leftover_blocks, columns: 1))
 end
 
 rebuild_scenes.()
@@ -812,9 +816,28 @@ rebuild_scenes.()
              rebuild_scenes.()
            rescue
              e -> Panel.report(ui, "scenes rebuild failed: #{Exception.message(e)}")
+           catch
+             :exit, reason -> Panel.report(ui, "scenes rebuild failed: #{inspect(reason)}")
            end
          end
 ```
+
+  **Revised twice after Task 5 originally landed**, both times during later
+  review passes: Task 6's review added the `catch :exit` clause above,
+  matching the width every other rebuild wrapper in the router now has
+  (`rebuild_scenes.()` makes the same class of inter-process `Kino`/`Agent`
+  calls a plain `rescue` does not catch if one of them exits). A separate,
+  later review caught that `rebuild_scenes` itself was the one rebuild fn
+  still on the old pid-collection shape — pids threaded back out through
+  tuple returns (`{pid, block}`, `Enum.unzip/1`) and stored in one bulk
+  `Agent.update` only if the whole rebuild finished, so a crash partway
+  through left that generation's controls unregistered and unkillable by
+  any later rebuild. Step 2's code above is the fix: `scene_listeners` is
+  reset to `[]` right after the terminate step, a `register` helper appends
+  each pid the instant `Kino.listen` returns it, and `scene_row`/
+  `group_block` return plain blocks instead of `{pids, block}` tuples — the
+  same shape `rebuild_rooms` (Task 3) and `rebuild_management` (Task 6)
+  already use.
 
   Only `:add`/`:delete` trigger a rebuild. Plain `:update` scene events (the
   bridge rewrites a room's scenes when its membership changes — a phase-0
