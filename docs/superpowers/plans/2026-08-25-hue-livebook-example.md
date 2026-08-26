@@ -346,7 +346,7 @@ the bridge also recomputes group aggregates, so one light produces a
 `grouped_light` event too.
 
 ```elixir
-frame = Kino.frame(placeholder: false)
+frame = Kino.Frame.new(placeholder: false)
 
 {:ok, _listener} =
   Kino.start_child(

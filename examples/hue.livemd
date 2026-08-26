@@ -239,3 +239,50 @@ end)
 
 form
 ```
+
+## Watch it live
+
+Subscribing delivers `{:hue, %Hue.Event{}}` to the calling process, and the
+subscription dies with that process — so the listener below is a supervised
+task that subscribes itself. Flip a light in the Hue app, or use the control
+panel above, and watch the deltas arrive. Notice a single change fans out:
+the bridge also recomputes group aggregates, so one light produces a
+`grouped_light` event too.
+
+```elixir
+frame = Kino.Frame.new(placeholder: false)
+
+{:ok, _listener} =
+  Kino.start_child(
+    {Task,
+     fn ->
+       :ok = Hue.Bridge.subscribe(LivebookHue)
+
+       Stream.repeatedly(fn ->
+         receive do
+           {:hue, event} ->
+             name = Hue.Bridge.name_of(LivebookHue, event.resource_type, event.rid)
+
+             Kino.Frame.append(
+               frame,
+               Kino.Markdown.new(
+                 "`#{event.resource_type}` **#{name || event.rid}** → `#{inspect(event.data)}`"
+               )
+             )
+         end
+       end)
+       |> Stream.run()
+     end}
+  )
+
+frame
+```
+
+## Where to next
+
+Everything this notebook did, your application does with the same calls:
+put `{Hue.Bridge, name: MyApp.Hue, client: client}` in your supervision
+tree, store the application key like the password it is, and read the
+[moduledocs](https://hexdocs.pm/hue) — `Hue.Bridge` for the live model and
+its failure semantics, `Hue.Light` for writes, `Hue.Resource` for the
+stateless layer-1 escape hatch this notebook never needed.
