@@ -94,3 +94,78 @@ application_key =
 
 :paired
 ```
+
+## Start the live bridge
+
+`Hue.Bridge` never starts itself — it's a `child_spec` you place in your own
+supervision tree, the way Finch or Redix are. In an application that looks
+like:
+
+<!-- livebook:{"force_markdown":true} -->
+
+```elixir
+children = [
+  {Hue.Bridge, name: MyApp.Hue, client: client}
+]
+```
+
+In Livebook, `Kino.start_child/1` is that same placement. On start the
+bridge fetches everything once to seed its cache, then holds an eventstream
+open to keep it current; `:live` means both are done. Re-running this cell
+errors with `:already_started` — that's your supervision tree telling the
+truth, not a bug. Restart the runtime to start over.
+
+```elixir
+{:ok, client} = Hue.from_bridge(bridge_info, application_key: application_key)
+{:ok, _supervisor} = Kino.start_child({Hue.Bridge, name: LivebookHue, client: client})
+
+Enum.reduce_while(1..50, nil, fn _, _ ->
+  case Hue.Bridge.status(LivebookHue) do
+    :live -> {:halt, :live}
+    status -> Process.sleep(200) && {:cont, status}
+  end
+end)
+```
+
+## What's in the house
+
+Reads are `:ets.lookup` calls in your own process — they never touch the
+bridge or even the bridge's process. A light's own `metadata` is deprecated
+in CLIP v2, so names are resolved through the owning device, which
+`Hue.Bridge.name_of/3` does for you.
+
+```elixir
+{:ok, lights} = Hue.Light.list(LivebookHue)
+
+lights
+|> Enum.map(fn light ->
+  %{
+    name: Hue.Bridge.name_of(LivebookHue, :light, light["id"]),
+    on: get_in(light, ["on", "on"]),
+    brightness: get_in(light, ["dimming", "brightness"])
+  }
+end)
+|> Enum.sort_by(& &1.name)
+|> Kino.DataTable.new(name: "Lights")
+```
+
+Rooms and scenes carry their own authoritative names:
+
+```elixir
+{:ok, rooms} = Hue.Room.list(LivebookHue)
+{:ok, scenes} = Hue.Scene.list(LivebookHue)
+
+Kino.Layout.grid(
+  [
+    Kino.DataTable.new(
+      Enum.map(rooms, &%{room: get_in(&1, ["metadata", "name"])}),
+      name: "Rooms"
+    ),
+    Kino.DataTable.new(
+      Enum.map(scenes, &%{scene: get_in(&1, ["metadata", "name"])}),
+      name: "Scenes"
+    )
+  ],
+  columns: 2
+)
+```
