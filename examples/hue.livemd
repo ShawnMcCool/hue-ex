@@ -24,6 +24,11 @@ An application key is a password. This cell keeps it out of the notebook
 file itself, in `.hue.json` next to the notebook (gitignored in the hue
 repository). Delete that file to start over from discovery.
 
+Saving beside the notebook only works when the notebook is opened from a
+cloned repo (or any saved `.livemd` on disk) — launched via the "Run in
+Livebook" badge, Livebook autosaves to a temporary location, so the
+credentials won't persist across sessions and pairing will repeat.
+
 ```elixir
 creds_path = Path.join(__DIR__, ".hue.json")
 
@@ -43,6 +48,11 @@ parallel, then verifies each candidate with a real connection and pins the
 certificate it finds — the SSH host-key model, because a Hue bridge's
 certificate can't be verified any conventional way. The pin rides along in
 the returned `Hue.Bridge.Info` and every later connection checks against it.
+
+If discovery finds nothing — mDNS is silent on routed networks, with no
+error to explain why — this cell crashes with a `MatchError` on the empty
+list. The escape hatch is `Hue.Discovery.identify/2` with the bridge's IP:
+it captures the fingerprint on first contact the same way `discover/1` does.
 
 On a re-run this cell rebuilds that `Info` from the saved file instead.
 
@@ -88,6 +98,8 @@ application_key =
         application_key: key
       })
     )
+
+    File.chmod!(creds_path, 0o600)
 
     key
   end
