@@ -189,6 +189,32 @@ defmodule Panel do
     end
   end
 
+  # -- scenes --------------------------------------------------------------
+
+  def scene_action(light) do
+    action =
+      %{"on" => %{"on" => get_in(light, ["on", "on"])}}
+      |> then(fn a ->
+        if bri = get_in(light, ["dimming", "brightness"]),
+          do: Map.put(a, "dimming", %{"brightness" => bri}),
+          else: a
+      end)
+      |> then(fn a ->
+        cond do
+          xy = get_in(light, ["color", "xy"]) ->
+            Map.put(a, "color", %{"xy" => xy})
+
+          mirek = get_in(light, ["color_temperature", "mirek"]) ->
+            Map.put(a, "color_temperature", %{"mirek" => mirek})
+
+          true ->
+            a
+        end
+      end)
+
+    %{"target" => %{"rid" => light["id"], "rtype" => "light"}, "action" => action}
+  end
+
   # -- activity ------------------------------------------------------------
 
   @activity_cap 50
@@ -350,6 +376,110 @@ lights_tab =
   Kino.Layout.grid([picker, ui.light_state, controls, blink], columns: 1)
 ```
 
+## Scenes
+
+Scenes are room-owned: a scene's `"group"` names the room it belongs to, and
+recalling it drives every light that room's devices carry to the state it
+captured. Saving snapshots the room's current light state into a new scene.
+
+Recall buttons and save forms are rebuilt from scratch whenever a scene is
+added or deleted (topology), never on a plain state update. That rebuild
+replaces `ui.scenes`' contents, but the controls it discards keep their own
+`Kino.listen` processes running unless those are stopped explicitly — Kino
+ties a control's lifetime to the pid that created it terminating, or to that
+pid's *cell* re-evaluating (`Kino.Bridge.reference_object/2`'s doc: "Any
+monitoring added to object will be dispatched once all of its associated
+pids terminate or the associated cells reevaluate"), never to whether the
+control is still rendered anywhere. Since every rebuild runs from the same
+long-lived router process, neither condition ever fires between rebuilds, so
+the old listener processes would otherwise accumulate for the life of the
+session. `scene_listeners` holds the pids `Kino.listen` returns so each
+rebuild can `Kino.terminate_child/1` the previous batch before starting the
+next.
+
+```elixir
+{:ok, scene_listeners} = Kino.start_child({Agent, fn -> [] end})
+
+save_scene = fn room, name ->
+  actions = room |> Panel.lights_in_room() |> Enum.map(&Panel.scene_action/1)
+
+  Hue.Resource.create(client, :scene, %{
+    "metadata" => %{"name" => name},
+    "group" => %{"rid" => room["id"], "rtype" => "room"},
+    "actions" => actions
+  })
+end
+
+rebuild_scenes = fn ->
+  Enum.each(Agent.get(scene_listeners, & &1), &Kino.terminate_child/1)
+
+  {:ok, scenes} = Hue.Scene.list(HuePanel)
+  {:ok, rooms} = Hue.Room.list(HuePanel)
+
+  by_group = Enum.group_by(scenes, & &1["group"]["rid"])
+  room_ids = MapSet.new(rooms, & &1["id"])
+
+  scene_row = fn scene ->
+    name = get_in(scene, ["metadata", "name"])
+    button = Kino.Control.button("Recall")
+
+    pid =
+      Kino.listen(button, fn _ ->
+        Panel.report_result(ui, "recall #{name}", Hue.Scene.recall(HuePanel, scene["id"]))
+      end)
+
+    {pid, Kino.Layout.grid([Kino.Markdown.new(name), button], columns: 2)}
+  end
+
+  group_block = fn heading, group_scenes, save_room ->
+    {pids, rows} = group_scenes |> Enum.map(scene_row) |> Enum.unzip()
+
+    save_row =
+      if save_room do
+        form =
+          Kino.Control.form([name: Kino.Input.text("New scene from current state")], submit: "Save")
+
+        form_pid =
+          Kino.listen(form, fn %{data: %{name: name}} ->
+            result = save_scene.(save_room, name)
+            outcome = if match?({:ok, _}, result), do: :ok, else: result
+            Panel.report_result(ui, "save \"#{name}\"", outcome)
+          end)
+
+        [{form_pid, form}]
+      else
+        []
+      end
+
+    {save_pids, save_rows} = Enum.unzip(save_row)
+
+    block =
+      Kino.Layout.grid([Kino.Markdown.new("**#{heading}**")] ++ rows ++ save_rows, columns: 1)
+
+    {pids ++ save_pids, block}
+  end
+
+  room_results =
+    for room <- rooms do
+      group_block.(get_in(room, ["metadata", "name"]), Map.get(by_group, room["id"], []), room)
+    end
+
+  leftover_results =
+    for {group_rid, group_scenes} <- by_group, not MapSet.member?(room_ids, group_rid) do
+      %{"rtype" => rtype} = hd(group_scenes)["group"]
+      heading = Panel.name(String.to_existing_atom(rtype), group_rid)
+      group_block.(heading, group_scenes, nil)
+    end
+
+  {pid_lists, blocks} = Enum.unzip(room_results ++ leftover_results)
+
+  Kino.Frame.render(ui.scenes, Kino.Layout.grid(blocks, columns: 1))
+  Agent.update(scene_listeners, fn _ -> List.flatten(pid_lists) end)
+end
+
+rebuild_scenes.()
+```
+
 ## Event router
 
 ```elixir
@@ -372,6 +502,9 @@ lights_tab =
          if event.resource_type == :zigbee_connectivity,
            do: Panel.render_light_state(ui, Agent.get(selected_light, & &1))
 
+         if event.resource_type == :scene and event.type in [:add, :delete],
+           do: rebuild_scenes.()
+
          history
        end)
      end}
@@ -386,6 +519,7 @@ lights_tab =
 Kino.Layout.tabs([
   {"Rooms", ui.rooms},
   {"Lights", lights_tab},
+  {"Scenes", ui.scenes},
   {"Activity", ui.activity}
 ])
 |> then(&Kino.Layout.grid([ui.status, &1], columns: 1))

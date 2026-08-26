@@ -611,9 +611,36 @@ the selected rid because light events are frequent.
   end
 ```
 
-- [ ] **Step 2: Add a `## Scenes` section** — per room: recall buttons for its scenes plus a save form. Scene→room grouping comes from each scene's `"group"` ref. Save creates via layer 1:
+- [ ] **Step 2: Add a `## Scenes` section** between "Lights" and "Event
+  router" — right after the `## Lights` section, so `save_scene` and
+  `rebuild_scenes` (built here) are in scope for the router cell that
+  follows. Prose, then code, exactly:
+
+````markdown
+## Scenes
+
+Scenes are room-owned: a scene's `"group"` names the room it belongs to, and
+recalling it drives every light that room's devices carry to the state it
+captured. Saving snapshots the room's current light state into a new scene.
+
+Recall buttons and save forms are rebuilt from scratch whenever a scene is
+added or deleted (topology), never on a plain state update. That rebuild
+replaces `ui.scenes`' contents, but the controls it discards keep their own
+`Kino.listen` processes running unless those are stopped explicitly — Kino
+ties a control's lifetime to the pid that created it terminating, or to that
+pid's *cell* re-evaluating (`Kino.Bridge.reference_object/2`'s doc: "Any
+monitoring added to object will be dispatched once all of its associated
+pids terminate or the associated cells reevaluate"), never to whether the
+control is still rendered anywhere. Since every rebuild runs from the same
+long-lived router process, neither condition ever fires between rebuilds, so
+the old listener processes would otherwise accumulate for the life of the
+session. `scene_listeners` holds the pids `Kino.listen` returns so each
+rebuild can `Kino.terminate_child/1` the previous batch before starting the
+next.
 
 ```elixir
+{:ok, scene_listeners} = Kino.start_child({Agent, fn -> [] end})
+
 save_scene = fn room, name ->
   actions = room |> Panel.lights_in_room() |> Enum.map(&Panel.scene_action/1)
 
@@ -623,22 +650,127 @@ save_scene = fn room, name ->
     "actions" => actions
   })
 end
+
+rebuild_scenes = fn ->
+  Enum.each(Agent.get(scene_listeners, & &1), &Kino.terminate_child/1)
+
+  {:ok, scenes} = Hue.Scene.list(HuePanel)
+  {:ok, rooms} = Hue.Room.list(HuePanel)
+
+  by_group = Enum.group_by(scenes, & &1["group"]["rid"])
+  room_ids = MapSet.new(rooms, & &1["id"])
+
+  scene_row = fn scene ->
+    name = get_in(scene, ["metadata", "name"])
+    button = Kino.Control.button("Recall")
+
+    pid =
+      Kino.listen(button, fn _ ->
+        Panel.report_result(ui, "recall #{name}", Hue.Scene.recall(HuePanel, scene["id"]))
+      end)
+
+    {pid, Kino.Layout.grid([Kino.Markdown.new(name), button], columns: 2)}
+  end
+
+  group_block = fn heading, group_scenes, save_room ->
+    {pids, rows} = group_scenes |> Enum.map(scene_row) |> Enum.unzip()
+
+    save_row =
+      if save_room do
+        form =
+          Kino.Control.form([name: Kino.Input.text("New scene from current state")], submit: "Save")
+
+        form_pid =
+          Kino.listen(form, fn %{data: %{name: name}} ->
+            result = save_scene.(save_room, name)
+            outcome = if match?({:ok, _}, result), do: :ok, else: result
+            Panel.report_result(ui, "save \"#{name}\"", outcome)
+          end)
+
+        [{form_pid, form}]
+      else
+        []
+      end
+
+    {save_pids, save_rows} = Enum.unzip(save_row)
+
+    block =
+      Kino.Layout.grid([Kino.Markdown.new("**#{heading}**")] ++ rows ++ save_rows, columns: 1)
+
+    {pids ++ save_pids, block}
+  end
+
+  room_results =
+    for room <- rooms do
+      group_block.(get_in(room, ["metadata", "name"]), Map.get(by_group, room["id"], []), room)
+    end
+
+  leftover_results =
+    for {group_rid, group_scenes} <- by_group, not MapSet.member?(room_ids, group_rid) do
+      %{"rtype" => rtype} = hd(group_scenes)["group"]
+      heading = Panel.name(String.to_existing_atom(rtype), group_rid)
+      group_block.(heading, group_scenes, nil)
+    end
+
+  {pid_lists, blocks} = Enum.unzip(room_results ++ leftover_results)
+
+  Kino.Frame.render(ui.scenes, Kino.Layout.grid(blocks, columns: 1))
+  Agent.update(scene_listeners, fn _ -> List.flatten(pid_lists) end)
+end
+
+rebuild_scenes.()
+```
+````
+
+  Rooms with zero scenes still get a block (heading + save form, no recall
+  rows) so a fresh room can capture its first scene. Scenes whose `"group"`
+  rid matches no listed room (zone-owned scenes, e.g. `full_state.json`'s
+  "Scene 15/16/22") group under a heading resolved via `Panel.name/2` and get
+  recall rows but no save form — save is room-only by construction (the
+  create body's `"group"` is hardcoded to `"rtype" => "room"`).
+
+- [ ] **Step 3: Router** — after the `:zigbee_connectivity` clause, add:
+
+```elixir
+         if event.resource_type == :scene and event.type in [:add, :delete],
+           do: rebuild_scenes.()
 ```
 
-Recall buttons: `Kino.Control.button(scene_name)` + `Kino.listen` →
-`Panel.report_result(ui, "recall #{scene_name}", Hue.Scene.recall(HuePanel, scene["id"]))`.
-Save form per room: `Kino.Control.form([name: Kino.Input.text("New scene from current state")], submit: "Save")` →
-`report_result` on `save_scene.(room, name)` (a `{:ok, _}` create counts as success — normalize with `match?({:ok, _}, r)`).
-Compose rows into `ui.scenes` the way Task 3 composed `ui.rooms`; scenes-tab
-controls rebuild on `:scene` add/delete via a `rebuild_scenes` fun the router
-calls (this is the topology-rebuild case; keep the fun in a cell variable the
-router closes over).
+  Only `:add`/`:delete` trigger a rebuild. Plain `:update` scene events (the
+  bridge rewrites a room's scenes when its membership changes — a phase-0
+  finding) must not: recall buttons key on rid, not name, so a rename that
+  arrives as `:update` leaves a stale label until the next add/delete. This
+  matches the plan's Task 6 note about the bridge rewriting scenes on
+  membership moves. The router closes over `rebuild_scenes`, which the
+  Scenes section (Step 2) binds before the Event router cell — same
+  ordering rule as Task 4's `selected_light`.
 
-- [ ] **Step 3: Tab** — `{"Scenes", ui.scenes}` after Lights.
+- [ ] **Step 4: Tab** — `{"Scenes", ui.scenes}` after Lights.
 
-- [ ] **Step 4: Proofread** — scene create body shape against the fixture's scene resources (`full_state.json` — confirm `actions`/`target`/`action` nesting and whether `"speed"` or other keys are required — the fixture is the measured truth); `Hue.Scene.recall/3` accepting a rid.
+- [ ] **Step 5: Proofread** — confirmed clean, no code changes needed:
+  - Scene create body shape confirmed against `full_state.json`'s 34 scene
+    resources: every `actions` entry is exactly
+    `%{"target" => %{"rid", "rtype"}, "action" => %{...}}`, and every scene's
+    `"group"` is `%{"rid", "rtype" => "room" | "zone"}` — 31 room-owned, 3
+    zone-owned. `Panel.scene_action/1`'s output and `save_scene`'s `"group"`
+    match this shape exactly.
+  - Every fixture scene also carries `speed` (float) and `auto_dynamic`
+    (bool) at the top level, alongside server-computed fields (`status`,
+    `last_actions_update`, `palette`, `id_v1`, `recall: %{}`) that a create
+    body plainly should not send. `full_state.json` is a captured GET
+    response, which cannot show what a POST requires — presence in every
+    read does not prove requirement on write. Nothing suspicious enough to
+    act on preemptively; left for Task 8's hardware run to prove or
+    disprove (a 4xx on create naming a missing field would be the signal).
+  - `Hue.Scene.recall/3` (`lib/hue/scene.ex`): `recall(bridge, target, options \\ [])` resolves `target` by name or rid via `get/2` → `Bridge.resolve(bridge, :scene, target)`, the same rid-first lookup Task 3 and Task 4 verified — a rid target needs no adaptation. Its only option is `:duration`; `Hue.Scene.recall(HuePanel, scene["id"])` with no options is a bare default-options call, matching the plan.
+  - `Hue.Scene.list/1` scene map's `"group"` key confirmed as `%{"rid" => _, "rtype" => "room" | "zone"}` directly from the fixture (see above) — matches `scene["group"]["rid"]`/`["rtype"]` usage in `by_group` and the leftover-group heading lookup.
+  - `Kino.Input.text/2` (`lib/kino/input.ex`): `text(label, opts \\ [])`, so the single-argument call is valid. `Kino.Control.form/2` with `submit: "Save"` and no `report_changes` — same pattern as Lights' Apply form.
+  - Controls inside frames: already proven by Task 3's `ui.rooms` (buttons and a form composed via `Kino.Layout.grid` and rendered into a frame) and reused as-is here — no restructuring needed.
+  - **Listener lifecycle** (kino 0.19.0, the exact version this repo's `Mix.install` pins): `Kino.Control.new/1` (backing `button/1` and `form/2`, `lib/kino/control.ex`) calls `Kino.Bridge.reference_object(ref, self())`. `Kino.Bridge.reference_object/2`'s doc (`lib/kino/bridge.ex`) states plainly: "Any monitoring added to `object` will be dispatched once all of its associated pids terminate or the associated cells reevaluate." There is no third condition for "the control stopped being rendered." `Kino.listen/2` (`lib/kino.ex`) spawns its worker via `async/1`, which calls `Kino.start_child(%{id: Task, start: {Kino.Terminator, :start_task, [self(), fun]}, restart: :temporary})` and returns the resulting pid (`@spec listen(...) :: pid()`). Both the control's `reference_object` pid and the listener Task's parent-link are the pid that was executing when `rebuild_scenes.()` ran — the Event router's long-lived `Task` process, since the router calls `rebuild_scenes.()` directly rather than re-evaluating the Scenes cell. That process never terminates and its cell (Event router) never reevaluates between rebuilds, so neither of `reference_object`'s two cleanup conditions ever fires: a rebuild that only replaces `ui.scenes`' rendered content, without also killing the previous batch's listeners, would accumulate one live `Task` per stale scene button/form on every `:scene` add/delete for the life of the session — exactly the unbounded growth the task named as the risk. Fix: `scene_listeners` (an `Agent` started once) holds the pid `Kino.listen/2` returns for every control created in a rebuild; the next rebuild's first action is `Enum.each(Agent.get(scene_listeners, & &1), &Kino.terminate_child/1)` — `Kino.terminate_child/1` (`lib/kino.ex`, public since 0.9.1) calls `DynamicSupervisor.terminate_child(Kino.DynamicSupervisor, pid)` on exactly the pid `Kino.start_child/1` handed back, so it is the correct, documented way to stop what `Kino.listen/2` started. This kills the stale listener processes; it does not clear the dead controls' `Kino.SubscriptionManager` topic entries (those stay keyed until the creating pid dies or its cell reevaluates), but a topic entry with no listening process and no rendered client element is inert bookkeeping, not a live process — the growth that mattered (processes, each blocked in `Enum.each` on a stream) is what gets bounded.
+  - Binding order: `## Scenes` sits after `## Lights` and before `## Event router`, so `ui`, `Panel`, and `client` (Connect/Helpers) are already in scope, and `save_scene`/`rebuild_scenes` (bound in Scenes) are in scope for the router's added `:scene` dispatch clause.
+  - All 9 code cells (including the two touched by this task) syntax-checked with `Code.string_to_quoted!/1` — clean.
 
-- [ ] **Step 5: Commit** — `Control panel: scenes recalled and captured`
+- [ ] **Step 6: Commit** — `Control panel: scenes recalled and captured`
 
 ---
 
