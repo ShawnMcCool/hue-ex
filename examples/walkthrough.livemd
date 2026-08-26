@@ -15,27 +15,36 @@ changes stream in live. Run it top to bottom against a real bridge on your
 network.
 
 The first run pairs — you'll press the bridge's round link button once. The
-result is saved beside this notebook, so every later run reconnects without
-asking.
+result is saved to `~/.config/hue_livebooks/hue.json`, so every later run
+reconnects without asking.
 
 ## Saved credentials
 
 An application key is a password. This cell keeps it out of the notebook
-file itself, in `.hue.json` next to the notebook (gitignored in the hue
-repository). Delete that file to start over from discovery.
-
-Saving beside the notebook only works when the notebook is opened from a
-cloned repo (or any saved `.livemd` on disk) — launched via the "Run in
-Livebook" badge, Livebook autosaves to a temporary location, so the
-credentials won't persist across sessions and pairing will repeat.
+file itself, in `~/.config/hue_livebooks/hue.json` — so every copy of these
+notebooks, cloned, badge-launched, or deployed as a Livebook app, shares one
+pairing. A legacy `.hue.json` beside the notebooks is still read if present.
+Delete the canonical file to start over from discovery.
 
 ```elixir
-creds_path = Path.join(__DIR__, ".hue.json")
+creds_path =
+  Path.join(to_string(:filename.basedir(:user_config, "hue_livebooks")), "hue.json")
+
+legacy_creds_path = Path.join(__DIR__, ".hue.json")
 
 saved =
   case File.read(creds_path) do
-    {:ok, json} -> Jason.decode!(json)
-    {:error, :enoent} -> nil
+    {:ok, json} ->
+      Jason.decode!(json)
+
+    {:error, :enoent} ->
+      case File.read(legacy_creds_path) do
+        {:ok, json} -> Jason.decode!(json)
+        {:error, _} -> nil
+      end
+
+    {:error, reason} ->
+      raise "could not read #{creds_path}: #{inspect(reason)}"
   end
 
 if saved, do: :reconnecting, else: :first_run
@@ -87,6 +96,8 @@ application_key =
   else
     {:ok, %{application_key: key}} =
       Hue.Pairing.pair_when_pressed(bridge_info, app: "livebook")
+
+    File.mkdir_p!(Path.dirname(creds_path))
 
     File.write!(
       creds_path,
@@ -229,7 +240,7 @@ Rooms, zones, and scenes work the same way — `Hue.Room.set/3`,
 Driving lights from forms is a different job from learning the API, so it
 has its own notebook: [`control_panel.livemd`](control_panel.livemd) is a
 full interface to your bridge — rooms, lights, scenes, management — and it
-reuses the `.hue.json` this notebook just saved, so it connects without
+reuses the credentials this notebook just saved, so it connects without
 pairing again.
 
 ## Watch it live

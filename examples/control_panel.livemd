@@ -2,6 +2,12 @@
 
 # Hue Control Panel
 
+Deploy as a Livebook app (the app icon in the sidebar) to run everything and
+see only the panel. In the editor, press `e a` to run all — every cell is
+required. Credentials are shared with the walkthrough at
+`~/.config/hue_livebooks/hue.json`; first run pairs — press the link button
+when asked.
+
 ```elixir
 Mix.install([
   {:hue, "~> 0.2"},
@@ -9,20 +15,31 @@ Mix.install([
 ])
 ```
 
-## Connect
+## Setup & Connect
 
-Run all. If `.hue.json` exists beside this notebook (the walkthrough saves
-it), the panel connects with it; otherwise it discovers your bridge and
-pairs — press the round link button when asked.
+Credentials load from `~/.config/hue_livebooks/hue.json` (shared with the
+walkthrough), falling back to a legacy file beside the notebook; first run
+discovers the bridge and pairs — press the round link button when asked.
 
 ```elixir
-creds_path = Path.join(__DIR__, ".hue.json")
+creds_path =
+  Path.join(to_string(:filename.basedir(:user_config, "hue_livebooks")), "hue.json")
+
+legacy_creds_path = Path.join(__DIR__, ".hue.json")
 
 saved =
   case File.read(creds_path) do
-    {:ok, json} -> Jason.decode!(json)
-    {:error, :enoent} -> nil
-    {:error, reason} -> raise "could not read #{creds_path}: #{inspect(reason)}"
+    {:ok, json} ->
+      Jason.decode!(json)
+
+    {:error, :enoent} ->
+      case File.read(legacy_creds_path) do
+        {:ok, json} -> Jason.decode!(json)
+        {:error, _} -> nil
+      end
+
+    {:error, reason} ->
+      raise "could not read #{creds_path}: #{inspect(reason)}"
   end
 
 {bridge_info, application_key} =
@@ -37,6 +54,8 @@ saved =
     {:ok, [info | _]} = Hue.Discovery.discover()
     IO.puts("Press the round link button on the bridge…")
     {:ok, %{application_key: key}} = Hue.Pairing.pair_when_pressed(info, app: "livebook")
+
+    File.mkdir_p!(Path.dirname(creds_path))
 
     File.write!(
       creds_path,
@@ -75,11 +94,11 @@ end)
 end
 ```
 
-## Helpers
+## Engine
 
-`Panel` renders every dynamic region from the cache. Controls call
-`Panel.report/2` with their outcome; the event router calls the `render_*`
-functions when the cache changes.
+`Panel` renders every dynamic region from the cache; controls report through
+`Panel.report_result/3`, and the router calls the `render_*` functions when
+the cache changes.
 
 ```elixir
 defmodule Panel do
@@ -278,19 +297,14 @@ ui = %{
 }
 ```
 
-## Rooms
-
-One row per room, then per zone: name, live state, On/Off, brightness. The
-plan's own binding convention ("topology events rebuild the affected tab's
-controls") applies here too: a room or zone created through Management must
-show up on this tab without re-running the cell, so the rows are rebuilt —
-same terminate-first pattern as Scenes — whenever a room or zone is added or
-deleted; the small state frame in each row is what live-updates otherwise.
-`group_frames_ref` holds the current generation's frames so the router's
-`render_group_states` call always reads the fresh set, never a binding
-captured before the last rebuild.
+One row per room and zone — name, live state, On/Off, brightness — rebuilt
+whenever a room or zone is added or deleted, so a group created through
+Management shows up here without re-running this cell.
 
 ```elixir
+# Rebuilt (not re-rendered) on room/zone add/delete; group_frames_ref always
+# holds the current generation, so the router's render_group_states call
+# never reads a binding captured before the last rebuild.
 {:ok, room_listeners} = Kino.start_child({Agent, fn -> [] end})
 {:ok, group_frames_ref} = Kino.start_child({Agent, fn -> %{} end})
 
@@ -356,11 +370,8 @@ end
 rebuild_rooms.()
 ```
 
-## Lights
-
-One light at a time: pick it, watch its state, drive it. The picker's
-selection lives in an `Agent` so the router knows which light's state line
-to refresh when an event arrives for a light that isn't the one on screen.
+Pick a light, watch its state, and drive it — the picker's selection lives
+in an `Agent` so the router knows which state line to refresh.
 
 ```elixir
 {:ok, lights} = Hue.Light.list(HuePanel)
@@ -426,43 +437,14 @@ lights_tab =
   Kino.Layout.grid([picker, ui.light_state, controls, blink], columns: 1)
 ```
 
-## Scenes
-
-Scenes are room-owned: a scene's `"group"` names the room it belongs to, and
-recalling it drives every light that room's devices carry to the state it
-captured. Saving snapshots the room's current light state into a new scene.
-
-Recall buttons and save forms are rebuilt from scratch whenever a scene is
-added or deleted (topology), never on a plain state update. That rebuild
-replaces `ui.scenes`' contents, but the controls it discards keep their own
-`Kino.listen` processes running unless those are stopped explicitly — Kino
-ties a control's lifetime to the pid that created it terminating, or to that
-pid's *cell* re-evaluating (`Kino.Bridge.reference_object/2`'s doc: "Any
-monitoring added to object will be dispatched once all of its associated
-pids terminate or the associated cells reevaluate"), never to whether the
-control is still rendered anywhere. Since every rebuild runs from the same
-long-lived router process, neither condition ever fires between rebuilds, so
-the old listener processes would otherwise accumulate for the life of the
-session. `scene_listeners` holds the pids `Kino.listen` returns so each
-rebuild can `Kino.terminate_child/1` the previous batch before starting the
-next. It is reset to `[]` immediately after that terminate step, and a
-`register` helper appends each new pid the instant `Kino.listen` returns it
-— the same shape Rooms and Management use — so a rebuild that raises
-partway through still leaves what it already built registered for the
-*next* rebuild's terminate-first step to clean up, rather than threading
-pids back out through tuple returns and storing them in one bulk update
-only if the whole rebuild finishes. A click that lands in the narrow window
-while a rebuild is replacing its button can be dropped along with the
-listener that would have handled it; this is accepted rather than guarded
-against, since the reappearing row is itself the feedback that the click
-needs to be repeated.
-
-Scene renames arrive as a plain `:update`, which does not trigger a rebuild,
-so a renamed scene's button keeps its old label until the next add or
-delete — recall keys on rid, not name, so the stale label still recalls the
-right scene.
+Scenes are room-owned: recall drives every light that room's devices carry
+to its captured state; a per-room form saves the current state as a new
+scene.
 
 ```elixir
+# Rebuilt (not re-rendered) on scene add/delete — Kino ties a control's
+# lifetime to its creating pid/cell, not to whether it's still rendered, so
+# the previous batch's listeners are terminated first or they'd leak.
 {:ok, scene_listeners} = Kino.start_child({Agent, fn -> [] end})
 
 save_scene = fn room, name ->
@@ -491,6 +473,8 @@ rebuild_scenes = fn ->
     name = get_in(scene, ["metadata", "name"])
     button = Kino.Control.button("Recall")
 
+    # Renames arrive as :update (no rebuild), so a label can go stale here —
+    # recall keys on rid, not name, so it still recalls the right scene.
     register.(
       Kino.listen(button, fn _ ->
         Panel.report_result(ui, "recall #{name}", Hue.Scene.recall(HuePanel, scene["id"]))
@@ -550,78 +534,24 @@ end
 rebuild_scenes.()
 ```
 
-## Management
-
-Everything below writes through `Hue.Resource` with raw CLIP v2 payloads —
-the library has no layer-2 wrapper for renames, room/zone create, membership
-editing, or device search/delete, so this tab doubles as the layer-1 escape
-hatch the other tabs never need. Sub-tabs are tiered by consequence: Rename
-and room/zone create are instant; deleting a scene, room, or zone sits behind
-a confirm checkbox; deleting a device sits behind typing its current name,
-because recovering an unpaired bulb can require a physical reset.
-
-Renaming a light renames the *device* that owns it: CLIP v2's authoritative
-name lives on the device, not the light (`Hue.Bridge.Names`'s moduledoc —
-"a light's name is not on the light") — the same fact the blink handler in
-Lights already resolves via `light["owner"]`.
-
-Rooms group devices; zones group lights directly. Confirmed against
-`test/support/fixtures/full_state.json`: every room's `children` carry
-`rtype: "device"`, every zone's carry `rtype: "light"`. Membership editing
-follows that split — the room editor adds and removes devices, the zone
-editor adds and removes lights — rather than one editor pretending the two
-are the same shape.
-
-Moving a device into a room is a single write to the destination room's
-`children`: phase 0 measured that the bridge auto-removes the device from
-its old room in the same stroke, no explicit removal step, and rewrites the
-old room's scenes to drop the departed light's actions (seven `update
-:scene` events on that measurement). A room gaining its first light also
-gains a `grouped_light` service in the same stroke — an empty room's
-controls elsewhere in the panel simply fail visibly (`:no_grouped_light`)
-until then.
-
-Device search runs through the bridge's one `zigbee_device_discovery`
-resource: writing `%{"action" => %{"action_type" => "search"}}` triggers it,
-and a joining device announces itself on the Activity feed like anything
-else the eventstream reports — there is no separate "new device" UI here.
-
-Kino forms can't repopulate one field's options in response to another
-field's live selection, so a picker spanning more than one resource type
-(Rename, Delete) folds the type into the option's *value* as a `"type:rid"`
-string instead of pairing a type-select with a resource-select that could
-never actually filter — rids are bridge-issued UUIDs and never contain a
-colon, so splitting on the first one is unambiguous. This replaces the
-type-select shape sketched in the plan with a single composite picker.
-
-The pickers here list topology (lights, rooms, zones, scenes, devices), so —
-same terminate-first pattern as Scenes — they rebuild on `:add`/`:delete` of
-any of those five resource types. One `rebuild_management.()` regenerates
-all four sub-tabs together and re-renders into a single `ui.management`
-frame; simpler than tracking four independent rebuilds for a tab that is
-touched rarely. The room/zone membership editors additionally hold their
-current group/member selection in a small `Agent` each (`Kino.Input.read/1`
-only works from the cell's own evaluation process, not from a listener or
-the router, so a change listener records the selection instead) and the
-router refreshes their members frame on every `:room`/`:zone` event, add or
-delete or plain update — a membership edit itself arrives as `:update`, not
-`:add`/`:delete`, so it would never reach a rebuild-only refresh.
-
-Two hardenings against a rebuild that raises partway through: every listener
-and `Agent` is registered into `management_listeners` the instant it is
-created, not collected locally and stored in one bulk update at the end — so
-a crash after the third control still leaves the first three registered,
-and the *next* rebuild's terminate-first step retires them instead of
-leaking them for the rest of the session. And `membership_refs` is reset to
-`%{room: nil, zone: nil}` immediately after the terminate step, before any
-new control exists — so a crash before the end-of-rebuild update leaves the
-router's `refresh_membership.()` pointing at nothing (a safe no-op) rather
-than at a generation whose pids have already been terminated.
+The layer-1 escape hatch: rename, room/zone create and membership editing,
+device search and delete — tiered by consequence (instant · confirm click ·
+type-to-confirm).
 
 ```elixir
+# Registered the instant each listener/Agent is created (not collected and
+# stored in bulk at the end), so a rebuild that raises partway still leaves
+# what it built registered for the next rebuild's terminate-first cleanup.
 {:ok, management_listeners} = Kino.start_child({Agent, fn -> [] end})
+
+# Reset to nil right after the terminate step (below), before any new
+# control exists — so a crash before the end-of-rebuild update leaves
+# refresh_membership pointing at nothing (a safe no-op), not a killed pid.
 {:ok, membership_refs} = Kino.start_child({Agent, fn -> %{room: nil, zone: nil} end})
 
+# Rooms group devices, zones group lights (confirmed against
+# full_state.json) — membership editing follows that split rather than one
+# editor pretending the two are the same shape.
 render_members = fn type, rid, frame ->
   content =
     case Hue.Bridge.fetch(HuePanel, type, rid) do
@@ -709,6 +639,9 @@ rebuild_management = fn ->
     if rename_options == [] do
       Kino.Markdown.new("*(nothing to rename)*")
     else
+      # Kino forms can't repopulate one field from another's live selection,
+      # so type folds into the option value as "type:rid" (rids never
+      # contain a colon) instead of a type-select that could never filter.
       rename_form =
         Kino.Control.form(
           [
@@ -766,6 +699,8 @@ rebuild_management = fn ->
     if room_options == [] or device_options == [] do
       {Kino.Markdown.new("*(no rooms or no devices yet)*"), nil}
     else
+      # Kino.Input.read/1 only works from the cell's own evaluation process,
+      # not a listener — so selection is tracked in this Agent instead.
       {:ok, room_membership_state} =
         Kino.start_child(
           {Agent,
@@ -797,6 +732,9 @@ rebuild_management = fn ->
 
       register.(
         Kino.listen(room_add_button, fn _ ->
+          # Measured against real hardware: writing a device into a new
+          # room auto-removes it from its old room in the same stroke, and
+          # rewrites the old room's scenes to drop that light's actions.
           %{group: group_rid, member: member_rid} = Agent.get(room_membership_state, & &1)
 
           result =
@@ -976,6 +914,8 @@ rebuild_management = fn ->
 
   register.(
     Kino.listen(search_button, fn _ ->
+      # zigbee_device_discovery is a bridge singleton; a joining device
+      # announces itself on Activity like any other event — no separate UI.
       result =
         case Hue.Resource.list(client, :zigbee_device_discovery) do
           {:ok, [discovery]} ->
@@ -1002,6 +942,8 @@ rebuild_management = fn ->
     if device_options == [] do
       Kino.Markdown.new("*(no devices)*")
     else
+      # Type-to-confirm, not a click or checkbox: recovering an unpaired
+      # bulb can require a physical reset.
       device_delete_form =
         Kino.Control.form(
           [
@@ -1114,8 +1056,6 @@ end
 rebuild_management.()
 ```
 
-## Event router
-
 ```elixir
 {:ok, _router} =
   Kino.start_child(
@@ -1167,6 +1107,8 @@ rebuild_management.()
            end
          end
 
+         # Runs on every :room/:zone event, not just add/delete — a
+         # membership edit itself arrives as :update.
          if event.resource_type in [:room, :zone] do
            try do
              refresh_membership.()

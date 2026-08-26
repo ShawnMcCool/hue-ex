@@ -16,6 +16,12 @@ it:
 Both read and write the same `examples/.hue.json`, so pairing once in either
 notebook connects both.
 
+> **Corrected after hardware verification:** both notebooks now read and
+> write `~/.config/hue_livebooks/hue.json` (`:filename.basedir/2`'s XDG
+> config dir) as the canonical, stable location — pairing once still
+> connects both. A legacy `examples/.hue.json` beside the notebooks is still
+> read if present, but no notebook writes there anymore.
+
 ## The control panel
 
 Built around the property the Hue app itself lacks a window into: the bridge
@@ -138,6 +144,17 @@ be run with the user.
 final cell renders one `Kino.Layout.tabs` output — Rooms | Lights | Scenes |
 Management | Activity. App settings are declared so the notebook deploys as
 a Livebook app: full-screen UI, no visible code.
+
+> **Corrected after hardware verification:** the panel was consolidated to
+> three sections — `## Setup & Connect`, `## Engine` (everything from the
+> `Panel` module through the event router), `## Panel` (the composed tabs
+> output) — at the user's request, once the per-tab `## Rooms`/`## Lights`/
+> `## Scenes`/`## Management`/`## Event router` headings and their long
+> rationale prose proved to be more ceremony than the notebook needed. Cell
+> order and code are unchanged; the long prose passages became short code
+> comments at the relevant lines, and each tab still carries its
+> user-visible warnings (the membership auto-move note, the device-delete
+> physical-reset note) as rendered markdown in the Management UI itself.
 
 **Rooms** — the home surface. One row per room and zone, all visible at once
 (homes have few rooms): name, live aggregate from `grouped_light`, On and

@@ -76,20 +76,31 @@ Mix.install([
 ])
 ```
 
-## Connect
+## Setup & Connect
 
-Run all. If `.hue.json` exists beside this notebook (the walkthrough saves
-it), the panel connects with it; otherwise it discovers your bridge and
-pairs — press the round link button when asked.
+Credentials load from `~/.config/hue_livebooks/hue.json` (shared with the
+walkthrough), falling back to a legacy file beside the notebook; first run
+discovers the bridge and pairs — press the round link button when asked.
 
 ```elixir
-creds_path = Path.join(__DIR__, ".hue.json")
+creds_path =
+  Path.join(to_string(:filename.basedir(:user_config, "hue_livebooks")), "hue.json")
+
+legacy_creds_path = Path.join(__DIR__, ".hue.json")
 
 saved =
   case File.read(creds_path) do
-    {:ok, json} -> Jason.decode!(json)
-    {:error, :enoent} -> nil
-    {:error, reason} -> raise "could not read #{creds_path}: #{inspect(reason)}"
+    {:ok, json} ->
+      Jason.decode!(json)
+
+    {:error, :enoent} ->
+      case File.read(legacy_creds_path) do
+        {:ok, json} -> Jason.decode!(json)
+        {:error, _} -> nil
+      end
+
+    {:error, reason} ->
+      raise "could not read #{creds_path}: #{inspect(reason)}"
   end
 
 {bridge_info, application_key} =
@@ -104,6 +115,8 @@ saved =
     {:ok, [info | _]} = Hue.Discovery.discover()
     IO.puts("Press the round link button on the bridge…")
     {:ok, %{application_key: key}} = Hue.Pairing.pair_when_pressed(info, app: "livebook")
+
+    File.mkdir_p!(Path.dirname(creds_path))
 
     File.write!(
       creds_path,
@@ -259,6 +272,16 @@ cell order from Task 3 onward: Connect → Helpers (`Panel` module, then `ui`)
 between the `ui` cell and "Event router", and grow the tabs list. The
 router's `reduce` gains render calls per event type as tabs land (Task 3
 adds the dispatch shown there).
+
+> **Corrected after hardware verification:** the per-tab `## Connect` /
+> `## Helpers` / `## Rooms` / `## Lights` / `## Scenes` / `## Management` /
+> `## Event router` heading structure sketched above and built through
+> Task 6 was consolidated to three sections at the user's request once the
+> notebook was hardware-verified — `## Setup & Connect`, `## Engine`
+> (`Panel`, `ui`, and every tab's code through the event router, in the
+> same cell order), `## Panel` (the composed tabs output). Cell order and
+> code are unchanged; each cell group's long rationale prose became a short
+> code comment at the relevant lines instead of its own section heading.
 
 - [ ] **Step 2: Proofread** — every hue call against `lib/` (`Hue.Bridge.fetch/3` returns `{:ok, map} | {:error, _}` — the `lights_in_room` comprehension matches `{:ok, x}` against a *singleton-list generator* (`{:ok, x} <- [fetch(...)]`), which filters rather than crashes on a miss; a plain `{:ok, x} = fetch(...)` match would instead raise `MatchError` on `{:error, _}`, so the `<-`-over-a-list idiom is load-bearing, not stylistic. Confirm the filtering behavior is wanted and it is: a missing device mid-topology-change should drop out, not crash the renderer). Every Kino call against hexdocs 0.19, especially `Kino.Frame.new/1` options, `Kino.Frame.render/2`, `Kino.Layout.tabs/1` tab-list shape, and the app-settings metadata line. `receive do: ({:hue, e} -> e)` — verify this one-liner form parses; if not, use the block form.
 
@@ -1712,6 +1735,26 @@ Kino.Layout.tabs([
 - [ ] Panel: run all with saved credentials; every tab exercised — rooms on/off/brightness, light controls incl. colour and blink (blink's body was unverifiable from the repo — this is its test), scene recall and save (delete the saved test scene via Management afterwards, which tests that gate too), rename + undo, membership move + restore, room create/delete, device search trigger and status (bulb join live-observation if a spare bulb is at hand — the deferred phase-0 item), Activity feed showing fan-out.
 - [ ] Panel as Livebook app: deploy from the Livebook UI, confirm the composed output is usable full-screen.
 - [ ] Fixes land as commits stating what the hardware run corrected; sync any notebook change into this plan if it contradicts a task's code.
+
+> **Corrected after hardware verification:** deploying the panel as a
+> Livebook app surfaced a defect the editor-mode run never could. Livebook
+> runs a deployed app from an autosave directory
+> (`~/.local/share/livebook/autosaved/<date>/<id>/`), not from the
+> notebook's own path — so `Path.join(__DIR__, ".hue.json")` (a) never finds
+> the credentials a normal editor run saved beside the repo notebooks, so
+> the app re-pairs needlessly, and (b) `File.write!` crashes with
+> `File.Error … no such file or directory` on the write after pairing,
+> because the autosave directory doesn't exist on disk. Screenshot-verified:
+> pairing succeeded, then the write crashed. Fixed in both notebooks by
+> moving the canonical credentials path to `~/.config/hue_livebooks/hue.json`
+> (`:filename.basedir(:user_config, "hue_livebooks")`, verified on this
+> machine to return an Elixir binary already, so no `to_string/1` wrap was
+> load-bearing but one is kept as a defensive no-op), read first with the
+> legacy `examples/.hue.json` beside the notebook as a fallback (any
+> failure to read the legacy path — including `__DIR__` not existing on
+> disk in app mode — is treated as "absent," not an error), and
+> `File.mkdir_p!(Path.dirname(creds_path))` before every write to it. See
+> Task 2's Connect cell (now `## Setup & Connect`) for the corrected code.
 
 ---
 

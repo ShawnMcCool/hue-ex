@@ -62,6 +62,14 @@ and it demonstrates the store-and-restore path every real integration needs —
 the application key is a stored credential, which is exactly how a consumer
 like Fae will treat it.
 
+> **Corrected after hardware verification:** the notebooks now save
+> credentials to `~/.config/hue_livebooks/hue.json` (`:filename.basedir/2`'s
+> XDG config dir), not `examples/.hue.json`. Deployed as a Livebook app, a
+> notebook runs from an autosave directory that does not exist on disk, so a
+> notebook-relative path both misses the pairing a normal run already saved
+> and crashes `File.write!` on a missing directory. A legacy
+> `examples/.hue.json` beside the notebooks is still read as a fallback.
+
 ## Repo integration
 
 - README gains a short "Try it" section pointing at the notebook.
