@@ -155,7 +155,8 @@ defmodule Panel do
           on,
           bri && "#{round(bri)}%",
           xy && "xy #{Float.round(xy["x"], 3)},#{Float.round(xy["y"], 3)}",
-          mirek && "#{mirek} mirek"
+          mirek && "#{mirek} mirek",
+          connectivity_status(light)
         ]
         |> Enum.reject(&is_nil/1)
         |> Enum.join(" · ")
@@ -167,6 +168,25 @@ defmodule Panel do
 
   def render_light_state(ui, rid) do
     Kino.Frame.render(ui.light_state, Kino.Markdown.new(light_state_line(rid)))
+  end
+
+  # v2 has no reachability field on :light itself — "reachable" lives on the
+  # owning device's zigbee_connectivity service. Every step degrades to nil
+  # rather than crashing: a device with no such service (e.g. a zgp remote),
+  # a cache miss mid-topology-change, or simply the normal "connected" case,
+  # which is deliberately silent so the line doesn't get noisier for the
+  # common state.
+  defp connectivity_status(light) do
+    with %{"rid" => device_rid} <- light["owner"],
+         {:ok, device} <- Hue.Bridge.fetch(@bridge, :device, device_rid),
+         %{"rid" => zc_rid} <-
+           Enum.find(device["services"] || [], &(&1["rtype"] == "zigbee_connectivity")),
+         {:ok, zc} <- Hue.Bridge.fetch(@bridge, :zigbee_connectivity, zc_rid),
+         status when status != "connected" <- zc["status"] do
+      status
+    else
+      _ -> nil
+    end
   end
 
   # -- activity ------------------------------------------------------------
@@ -311,11 +331,17 @@ end)
 
 Kino.listen(blink, fn _ ->
   rid = Agent.get(selected_light, & &1)
-  {:ok, light} = Hue.Bridge.fetch(HuePanel, :light, rid)
-  %{"rid" => device_rid} = light["owner"]
 
-  result = Hue.Resource.update(client, :device, device_rid, %{"identify" => %{"action" => "identify"}})
-  Panel.report_result(ui, "#{Panel.name(:light, rid)} → blink", result)
+  case Hue.Bridge.fetch(HuePanel, :light, rid) do
+    {:ok, light} ->
+      %{"rid" => device_rid} = light["owner"]
+
+      result = Hue.Resource.update(client, :device, device_rid, %{"identify" => %{"action" => "identify"}})
+      Panel.report_result(ui, "#{Panel.name(:light, rid)} → blink", result)
+
+    {:error, err} ->
+      Panel.report_result(ui, "blink", {:error, err})
+  end
 end)
 
 Panel.render_light_state(ui, elem(hd(light_options), 0))
@@ -342,6 +368,9 @@ lights_tab =
 
          if event.resource_type == :light and event.rid == Agent.get(selected_light, & &1),
            do: Panel.render_light_state(ui, event.rid)
+
+         if event.resource_type == :zigbee_connectivity,
+           do: Panel.render_light_state(ui, Agent.get(selected_light, & &1))
 
          history
        end)

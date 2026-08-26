@@ -435,7 +435,8 @@ Panel.render_group_states(group_frames)
           on,
           bri && "#{round(bri)}%",
           xy && "xy #{Float.round(xy["x"], 3)},#{Float.round(xy["y"], 3)}",
-          mirek && "#{mirek} mirek"
+          mirek && "#{mirek} mirek",
+          connectivity_status(light)
         ]
         |> Enum.reject(&is_nil/1)
         |> Enum.join(" · ")
@@ -447,6 +448,25 @@ Panel.render_group_states(group_frames)
 
   def render_light_state(ui, rid) do
     Kino.Frame.render(ui.light_state, Kino.Markdown.new(light_state_line(rid)))
+  end
+
+  # v2 has no reachability field on :light itself — "reachable" lives on the
+  # owning device's zigbee_connectivity service. Every step degrades to nil
+  # rather than crashing: a device with no such service (e.g. a zgp remote),
+  # a cache miss mid-topology-change, or simply the normal "connected" case,
+  # which is deliberately silent so the line doesn't get noisier for the
+  # common state.
+  defp connectivity_status(light) do
+    with %{"rid" => device_rid} <- light["owner"],
+         {:ok, device} <- Hue.Bridge.fetch(@bridge, :device, device_rid),
+         %{"rid" => zc_rid} <-
+           Enum.find(device["services"] || [], &(&1["rtype"] == "zigbee_connectivity")),
+         {:ok, zc} <- Hue.Bridge.fetch(@bridge, :zigbee_connectivity, zc_rid),
+         status when status != "connected" <- zc["status"] do
+      status
+    else
+      _ -> nil
+    end
   end
 ```
 
@@ -500,11 +520,17 @@ end)
 
 Kino.listen(blink, fn _ ->
   rid = Agent.get(selected_light, & &1)
-  {:ok, light} = Hue.Bridge.fetch(HuePanel, :light, rid)
-  %{"rid" => device_rid} = light["owner"]
 
-  result = Hue.Resource.update(client, :device, device_rid, %{"identify" => %{"action" => "identify"}})
-  Panel.report_result(ui, "#{Panel.name(:light, rid)} → blink", result)
+  case Hue.Bridge.fetch(HuePanel, :light, rid) do
+    {:ok, light} ->
+      %{"rid" => device_rid} = light["owner"]
+
+      result = Hue.Resource.update(client, :device, device_rid, %{"identify" => %{"action" => "identify"}})
+      Panel.report_result(ui, "#{Panel.name(:light, rid)} → blink", result)
+
+    {:error, err} ->
+      Panel.report_result(ui, "blink", {:error, err})
+  end
 end)
 
 Panel.render_light_state(ui, elem(hd(light_options), 0))
@@ -519,7 +545,15 @@ lights_tab =
 ```elixir
          if event.resource_type == :light and event.rid == Agent.get(selected_light, & &1),
            do: Panel.render_light_state(ui, event.rid)
+
+         if event.resource_type == :zigbee_connectivity,
+           do: Panel.render_light_state(ui, Agent.get(selected_light, & &1))
 ```
+
+The `:zigbee_connectivity` clause is unconditional on which device changed —
+it is a rare event, and re-rendering the selected light's state line from
+cache is cheap — unlike the `:light` clause above it, which is filtered to
+the selected rid because light events are frequent.
 
 - [ ] **Step 4: Tab** — `{"Lights", lights_tab}` after Rooms.
 
@@ -533,6 +567,8 @@ lights_tab =
   - Apply handler's opts: `use_color` branch correctly picks `color:` vs `kelvin:`. `Hue.Bridge.Body` accepts `:kelvin` as `is_integer(value) and value > 0` (`lib/hue/bridge/body.ex`), clamped to the light's own mirek schema by `Hue.Color.mirek_for/2`; `Kino.Input.range/2` always emits a float (its own doc: "either float in the configured range"), so `round(d.kelvin)` is required, not decorative — same as the brightness float already accepted as-is since `:brightness` validation allows any number.
   - `Hue.Light.set/3` with a rid target: confirmed — `set/3` calls `get(bridge, target)`, i.e. `Bridge.resolve(bridge, :light, target)`, the same resolution path Task 3 verified for rooms/zones (exact ETS lookup by rid before the name index).
   - Binding order: the `## Lights` section sits after `## Rooms` and before `## Event router` in the notebook, so `ui`, `Panel`, and `client` (all bound in earlier cells) are in scope, and `selected_light` (bound in Lights) is in scope for the router's added dispatch clause.
+  - **Reachability**: CLIP v2's `:light` resource has no reachability field of its own — "reachable" is the owning device's `zigbee_connectivity` service's `"status"` field. Confirmed against `test/support/fixtures/full_state.json`: 20 `zigbee_connectivity` resources, each `%{"id", "id_v1", "mac_address", "owner" => %{"rid", "rtype" => "device"}, "status", "type"}`, with observed statuses `"connected"` and `"connectivity_issue"`. Implemented as `Panel.connectivity_status/1` (private), taking the already-fetched light map (avoiding a redundant re-fetch) and walking light → `owner` → device → `services` → the entry with `"rtype" == "zigbee_connectivity"` → its cached resource → `"status"`, via a `with` chain where every step's mismatch (missing owner, missing device, no such service, e.g. a zgp device with no zigbee_connectivity, or a cache miss) falls through to `else -> nil`; the terminal clause additionally guards `status when status != "connected"` so the common case renders nothing. `light_state_line/1`'s element list gains this as its final entry, dropped by the existing `Enum.reject(&is_nil/1)` when `nil`. The router gains a `:zigbee_connectivity` clause, unconditional on device identity (see Step 3), since this event type is rare and the render is a cheap cache read.
+  - **Blink's fetch, guarded**: the original `{:ok, light} = Hue.Bridge.fetch(...)` inside the blink listener would raise `MatchError` if the selected light had been deleted since selection — the same silent-failure class as the transition-nil bug above (Kino's `safe_apply` swallows it, `Panel.report_result` never runs). Replaced with a `case`: `{:error, err}` now reports `Panel.report_result(ui, "blink", {:error, err})` instead of crashing invisibly.
   - All 8 code cells syntax-checked with `Code.string_to_quoted!/1` — clean.
   - Minor, unfixed, out of scope: `hd(light_options)` (both the Agent's initial value and the section's final `render_light_state` call) raises if the bridge reports zero lights. Every reference bridge fixture and every plausible install has at least one light, and Task 3's `groups` (rooms ++ zones) has the identical unguarded shape, so this is left consistent with that precedent rather than special-cased here.
 
