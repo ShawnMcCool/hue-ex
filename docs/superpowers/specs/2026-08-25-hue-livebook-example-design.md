@@ -63,8 +63,10 @@ the application key is a stored credential, which is exactly how a consumer
 like Fae will treat it.
 
 > **Corrected after hardware verification:** the notebooks now save
-> credentials to `~/.config/hue_livebooks/hue.json` (`:filename.basedir/2`'s
-> XDG config dir), not `examples/.hue.json`. Deployed as a Livebook app, a
+> credentials to the platform user config directory via `:filename.basedir/2`
+> (`~/.config/hue_livebooks` on Linux; `~/Library/Application
+> Support/hue_livebooks` on macOS; `%APPDATA%\hue_livebooks` on Windows), not
+> `examples/.hue.json`. Deployed as a Livebook app, a
 > notebook runs from an autosave directory that does not exist on disk, so a
 > notebook-relative path both misses the pairing a normal run already saved
 > and crashes `File.write!` on a missing directory. A legacy

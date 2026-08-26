@@ -78,8 +78,9 @@ Mix.install([
 
 ## Setup & Connect
 
-Credentials load from `~/.config/hue_livebooks/hue.json` (shared with the
-walkthrough), falling back to a legacy file beside the notebook; first run
+Credentials load from your platform's user config directory (shared with
+the walkthrough — see its "Saved credentials" section for the per-platform
+path), falling back to a legacy file beside the notebook; first run
 discovers the bridge and pairs — press the round link button when asked.
 
 ```elixir
@@ -1746,9 +1747,13 @@ Kino.Layout.tabs([
 > `File.Error … no such file or directory` on the write after pairing,
 > because the autosave directory doesn't exist on disk. Screenshot-verified:
 > pairing succeeded, then the write crashed. Fixed in both notebooks by
-> moving the canonical credentials path to `~/.config/hue_livebooks/hue.json`
-> (`:filename.basedir(:user_config, "hue_livebooks")`, verified on this
-> machine to return an Elixir binary already, so no `to_string/1` wrap was
+> moving the canonical credentials path to the platform user config
+> directory's `hue_livebooks/hue.json` via
+> `:filename.basedir(:user_config, "hue_livebooks")` (`~/.config/hue_livebooks`
+> on Linux, `~/Library/Application Support/hue_livebooks` on macOS,
+> `%APPDATA%\hue_livebooks` on Windows — confirmed against
+> `stdlib/src/filename.erl`'s `basedir_from_os/2`; verified on this machine
+> to return an Elixir binary already, so no `to_string/1` wrap was
 > load-bearing but one is kept as a defensive no-op), read first with the
 > legacy `examples/.hue.json` beside the notebook as a fallback (any
 > failure to read the legacy path — including `__DIR__` not existing on

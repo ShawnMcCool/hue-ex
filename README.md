@@ -53,8 +53,8 @@ feed. Deployable as a Livebook app.
 
 [![Run in Livebook](https://livebook.dev/badge/v1/blue.svg)](https://livebook.dev/run?url=https%3A%2F%2Fraw.githubusercontent.com%2FShawnMcCool%2Fhue-ex%2Fmain%2Fexamples%2Fcontrol_panel.livemd)
 
-They share one pairing: `~/.config/hue_livebooks/hue.json`, saved by
-whichever notebook runs first.
+They share one pairing, stored in your platform's user config directory
+(`hue_livebooks/hue.json`), saved by whichever notebook runs first.
 
 Cloning the repo and opening `examples/` works too.
 

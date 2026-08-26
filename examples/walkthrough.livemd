@@ -15,16 +15,22 @@ changes stream in live. Run it top to bottom against a real bridge on your
 network.
 
 The first run pairs — you'll press the bridge's round link button once. The
-result is saved to `~/.config/hue_livebooks/hue.json`, so every later run
+result is saved to your user config directory, so every later run
 reconnects without asking.
 
 ## Saved credentials
 
 An application key is a password. This cell keeps it out of the notebook
-file itself, in `~/.config/hue_livebooks/hue.json` — so every copy of these
-notebooks, cloned, badge-launched, or deployed as a Livebook app, shares one
-pairing. A legacy `.hue.json` beside the notebooks is still read if present.
-Delete the canonical file to start over from discovery.
+file itself, in your platform's user config directory under
+`hue_livebooks/hue.json` — so every copy of these notebooks, cloned,
+badge-launched, or deployed as a Livebook app, shares one pairing:
+
+- Linux — `~/.config/hue_livebooks/hue.json`
+- macOS — `~/Library/Application Support/hue_livebooks/hue.json`
+- Windows — `%APPDATA%\hue_livebooks\hue.json`
+
+A legacy `.hue.json` beside the notebooks is still read if present. Delete
+the canonical file to start over from discovery.
 
 ```elixir
 creds_path =

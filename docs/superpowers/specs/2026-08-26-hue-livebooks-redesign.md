@@ -17,10 +17,10 @@ Both read and write the same `examples/.hue.json`, so pairing once in either
 notebook connects both.
 
 > **Corrected after hardware verification:** both notebooks now read and
-> write `~/.config/hue_livebooks/hue.json` (`:filename.basedir/2`'s XDG
-> config dir) as the canonical, stable location — pairing once still
-> connects both. A legacy `examples/.hue.json` beside the notebooks is still
-> read if present, but no notebook writes there anymore.
+> write the platform user config directory via `:filename.basedir/2`
+> (`~/.config/hue_livebooks` on Linux) as the canonical, stable location —
+> pairing once still connects both. A legacy `examples/.hue.json` beside the
+> notebooks is still read if present, but no notebook writes there anymore.
 
 ## The control panel
 
