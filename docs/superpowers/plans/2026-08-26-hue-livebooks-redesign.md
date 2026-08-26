@@ -89,6 +89,7 @@ saved =
   case File.read(creds_path) do
     {:ok, json} -> Jason.decode!(json)
     {:error, :enoent} -> nil
+    {:error, reason} -> raise "could not read #{creds_path}: #{inspect(reason)}"
   end
 
 {bridge_info, application_key} =
@@ -127,6 +128,9 @@ Enum.reduce_while(1..50, nil, fn _, _ ->
     :live ->
       {:halt, :live}
 
+    {:error, _} = err ->
+      {:halt, err}
+
     status ->
       Process.sleep(200)
       {:cont, status}
@@ -134,7 +138,7 @@ Enum.reduce_while(1..50, nil, fn _, _ ->
 end)
 |> case do
   :live -> :live
-  status -> raise "bridge did not reach :live within 10s, last status: #{inspect(status)}"
+  status -> raise "bridge did not reach :live, status: #{inspect(status)}"
 end
 ```
 
@@ -180,6 +184,10 @@ defmodule Panel do
 
   @activity_cap 50
 
+  def describe(%Hue.Event{type: :error, resource_type: rt, rid: rid, data: %Hue.Error{reason: reason}}) do
+    "`#{rt}` **#{name(rt, rid)}** — write failed: #{reason}"
+  end
+
   def describe(%Hue.Event{type: t, resource_type: rt, rid: rid, data: data}) do
     what =
       cond do
@@ -220,8 +228,7 @@ ui = %{
 
        Stream.repeatedly(fn -> receive do: ({:hue, e} -> e) end)
        |> Enum.reduce([], fn event, history ->
-         [Panel.describe(event), history]
-         |> List.flatten()
+         [Panel.describe(event) | history]
          |> then(&Panel.render_activity(ui, &1))
        end)
      end}
