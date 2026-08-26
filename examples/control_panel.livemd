@@ -18,28 +18,18 @@ Mix.install([
 
 Credentials load from your platform's user config directory (shared with
 the walkthrough — see its "Saved credentials" section for the per-platform
-path), falling back to a legacy file beside the notebook; first run
-discovers the bridge and pairs — press the round link button when asked.
+path); first run discovers the bridge and pairs — press the round link
+button when asked.
 
 ```elixir
 creds_path =
   Path.join(to_string(:filename.basedir(:user_config, "hue_livebooks")), "hue.json")
 
-legacy_creds_path = Path.join(__DIR__, ".hue.json")
-
 saved =
   case File.read(creds_path) do
-    {:ok, json} ->
-      Jason.decode!(json)
-
-    {:error, :enoent} ->
-      case File.read(legacy_creds_path) do
-        {:ok, json} -> Jason.decode!(json)
-        {:error, _} -> nil
-      end
-
-    {:error, reason} ->
-      raise "could not read #{creds_path}: #{inspect(reason)}"
+    {:ok, json} -> Jason.decode!(json)
+    {:error, :enoent} -> nil
+    {:error, reason} -> raise "could not read #{creds_path}: #{inspect(reason)}"
   end
 
 {bridge_info, application_key} =
@@ -458,6 +448,8 @@ save_scene = fn room, name ->
 end
 
 rebuild_scenes = fn ->
+  # Accepted race: a click landing while this replaces its button is
+  # dropped — the reappearing row is the signal to re-click.
   Enum.each(Agent.get(scene_listeners, & &1), &Kino.terminate_child/1)
   Agent.update(scene_listeners, fn _ -> [] end)
 
@@ -624,6 +616,9 @@ rebuild_management = fn ->
 
   # ---- Rename ----
 
+  # CLIP v2's authoritative name lives on the device, not the light
+  # (Hue.Bridge.Names) — renaming a "light" here renames its owning device,
+  # so every light that device carries is renamed too.
   light_rename_options =
     for l <- lights, owner_rid = Panel.light_owner_rid(l["id"]), owner_rid do
       {"light:#{owner_rid}", "light: #{Panel.name(:light, l["id"])}"}

@@ -29,28 +29,17 @@ badge-launched, or deployed as a Livebook app, shares one pairing:
 - macOS — `~/Library/Application Support/hue_livebooks/hue.json`
 - Windows — `%APPDATA%\hue_livebooks\hue.json`
 
-A legacy `.hue.json` beside the notebooks is still read if present. Delete
-the canonical file to start over from discovery.
+Delete the canonical file to start over from discovery.
 
 ```elixir
 creds_path =
   Path.join(to_string(:filename.basedir(:user_config, "hue_livebooks")), "hue.json")
 
-legacy_creds_path = Path.join(__DIR__, ".hue.json")
-
 saved =
   case File.read(creds_path) do
-    {:ok, json} ->
-      Jason.decode!(json)
-
-    {:error, :enoent} ->
-      case File.read(legacy_creds_path) do
-        {:ok, json} -> Jason.decode!(json)
-        {:error, _} -> nil
-      end
-
-    {:error, reason} ->
-      raise "could not read #{creds_path}: #{inspect(reason)}"
+    {:ok, json} -> Jason.decode!(json)
+    {:error, :enoent} -> nil
+    {:error, reason} -> raise "could not read #{creds_path}: #{inspect(reason)}"
   end
 
 if saved, do: :reconnecting, else: :first_run

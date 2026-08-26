@@ -68,8 +68,12 @@ like Fae will treat it.
 > paths), not `examples/.hue.json`. Deployed as a Livebook app, a
 > notebook runs from an autosave directory that does not exist on disk, so a
 > notebook-relative path both misses the pairing a normal run already saved
-> and crashes `File.write!` on a missing directory. A legacy
-> `examples/.hue.json` beside the notebooks is still read as a fallback.
+> and crashes `File.write!` on a missing directory. A first pass added a
+> fallback read of the legacy `examples/.hue.json`; removed before merge —
+> the beside-the-notebook scheme never shipped in a release, so the
+> fallback only ever resurrected the author's own already-migrated file,
+> silently, with no write-through, making "delete the file to start over"
+> false for as long as it existed.
 
 ## Repo integration
 

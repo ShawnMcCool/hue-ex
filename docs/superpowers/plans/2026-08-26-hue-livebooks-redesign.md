@@ -80,28 +80,18 @@ Mix.install([
 
 Credentials load from your platform's user config directory (shared with
 the walkthrough — see its "Saved credentials" section for the per-platform
-path), falling back to a legacy file beside the notebook; first run
-discovers the bridge and pairs — press the round link button when asked.
+path); first run discovers the bridge and pairs — press the round link
+button when asked.
 
 ```elixir
 creds_path =
   Path.join(to_string(:filename.basedir(:user_config, "hue_livebooks")), "hue.json")
 
-legacy_creds_path = Path.join(__DIR__, ".hue.json")
-
 saved =
   case File.read(creds_path) do
-    {:ok, json} ->
-      Jason.decode!(json)
-
-    {:error, :enoent} ->
-      case File.read(legacy_creds_path) do
-        {:ok, json} -> Jason.decode!(json)
-        {:error, _} -> nil
-      end
-
-    {:error, reason} ->
-      raise "could not read #{creds_path}: #{inspect(reason)}"
+    {:ok, json} -> Jason.decode!(json)
+    {:error, :enoent} -> nil
+    {:error, reason} -> raise "could not read #{creds_path}: #{inspect(reason)}"
   end
 
 {bridge_info, application_key} =
@@ -1754,12 +1744,20 @@ Kino.Layout.tabs([
 > `%APPDATA%\hue_livebooks` on Windows — confirmed against
 > `stdlib/src/filename.erl`'s `basedir_from_os/2`; verified on this machine
 > to return an Elixir binary already, so no `to_string/1` wrap was
-> load-bearing but one is kept as a defensive no-op), read first with the
-> legacy `examples/.hue.json` beside the notebook as a fallback (any
-> failure to read the legacy path — including `__DIR__` not existing on
-> disk in app mode — is treated as "absent," not an error), and
+> load-bearing but one is kept as a defensive no-op), and
 > `File.mkdir_p!(Path.dirname(creds_path))` before every write to it. See
 > Task 2's Connect cell (now `## Setup & Connect`) for the corrected code.
+>
+> A first pass also added a legacy-path fallback (reading `examples/.hue.json`
+> beside the notebook when the canonical path was absent). Removed before
+> merge, once quality review named it a defect in its own right: the
+> beside-the-notebook scheme never shipped in a released version — this
+> branch is unmerged — so the only file it could ever fall back to was the
+> author's own, already migrated to the canonical path, and the fallback's
+> real effect was to make "delete the canonical file to start over" false
+> forever, silently resurrecting the old pairing with no write-through.
+> `.gitignore`'s `/examples/.hue.json` entry stays (a stray legacy file must
+> never become committable), but neither notebook reads it anymore.
 
 ---
 

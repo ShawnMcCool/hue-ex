@@ -19,8 +19,12 @@ notebook connects both.
 > **Corrected after hardware verification:** both notebooks now read and
 > write the platform user config directory via `:filename.basedir/2`
 > (`~/.config/hue_livebooks` on Linux) as the canonical, stable location —
-> pairing once still connects both. A legacy `examples/.hue.json` beside the
-> notebooks is still read if present, but no notebook writes there anymore.
+> pairing once still connects both. A first pass kept a legacy-path fallback
+> to `examples/.hue.json`; removed before merge, since the beside-the-notebook
+> scheme never shipped in a release on this unmerged branch — the fallback's
+> only real effect was to resurrect the author's own already-migrated file
+> forever, silently. `.gitignore`'s `/examples/.hue.json` entry stays so a
+> stray legacy file can't become committable, but neither notebook reads it.
 
 ## The control panel
 
