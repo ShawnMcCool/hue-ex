@@ -53,6 +53,17 @@ feed. Deployable as a Livebook app.
 
 [![Run in Livebook](https://livebook.dev/badge/v1/blue.svg)](https://livebook.dev/run?url=https%3A%2F%2Fraw.githubusercontent.com%2FShawnMcCool%2Fhue-ex%2Fmain%2Fexamples%2Fcontrol_panel.livemd)
 
+To serve the control panel as a standalone app instead — just the panel, no
+editor — boot Livebook in app mode from the directory you downloaded the
+notebooks into (the path must be absolute):
+
+```
+LIVEBOOK_APPS_PATH="$PWD" livebook server
+```
+
+Then open `/apps/hue-panel` on the address it prints. The first run pairs —
+watch for the press-the-link-button prompt in the app's output.
+
 They share one pairing, stored in your platform's user config directory
 (`hue_livebooks/hue.json`), saved by whichever notebook runs first.
 
