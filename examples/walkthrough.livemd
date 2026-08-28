@@ -25,9 +25,9 @@ file itself, in your platform's user config directory under
 `hue_livebooks/hue.json` — so every copy of these notebooks, cloned,
 badge-launched, or deployed as a Livebook app, shares one pairing:
 
-- Linux — `~/.config/hue_livebooks/hue.json`
-- macOS — `~/Library/Application Support/hue_livebooks/hue.json`
-- Windows — `%APPDATA%\hue_livebooks\hue.json`
+* Linux — `~/.config/hue_livebooks/hue.json`
+* macOS — `~/Library/Application Support/hue_livebooks/hue.json`
+* Windows — `%APPDATA%\hue_livebooks\hue.json`
 
 Delete that file to start over from discovery.
 
