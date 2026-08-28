@@ -365,10 +365,12 @@ defmodule Hue.TransportTest do
     end
 
     # Documents why customize_hostname_check does not do what its name suggests:
-    # a SAN-less certificate reached by IP loses its reference ids before the
-    # match fun is consulted, so hostname_check_failed pre-empts valid_peer.
-    # Connecting by address is one of the two things gating the :valid_peer
-    # branch; chain length is the other, covered by the tests below.
+    # the match fun is only consulted against identifiers the certificate
+    # presents. Reached by IP, a SAN-less certificate presents none — and since
+    # OTP 28.5 removed the CN-id fallback, it presents none for any kind of
+    # reference id — so hostname_check_failed pre-empts valid_peer. The
+    # hostname check is one of the two things gating the :valid_peer branch;
+    # chain length is the other, covered by the tests below.
     test "a trusted CA still cannot produce valid_peer over IP", %{connect: connect} do
       {ca_der, _} = Hue.Certificates.bridge_certificate("issuing_ca")
       port = Hue.Certificates.start_bridge_listener("00178800AABBCCDD")
@@ -394,10 +396,11 @@ defmodule Hue.TransportTest do
       refute_received {:event, :valid_peer}
     end
 
-    # The :valid_peer branch is gated by chain length, not by the empty CA
-    # store: path validation promotes an untrusted chain's head to the anchor
-    # and recurses over the remainder, so one certificate leaves nothing to
-    # validate. These two tests are why that branch must not be deleted.
+    # The :valid_peer branch is gated by chain length and the hostname check,
+    # not by the empty CA store: path validation promotes an untrusted chain's
+    # head to the anchor and recurses over the remainder, so one certificate
+    # leaves nothing to validate. These two tests are why that branch must not
+    # be deleted.
     test "one certificate produces no peer event at all" do
       {_der, fingerprint} = Hue.Certificates.bridge_certificate()
       port = Hue.Certificates.start_bridge_listener()
@@ -407,17 +410,19 @@ defmodule Hue.TransportTest do
 
     test "a chain reached by name produces valid_peer, and the pin fails it closed" do
       # Pinned to the issuer, so validation gets past the chain head and reaches
-      # the leaf. The leaf is not what was pinned, and this branch is what
-      # catches that.
-      {_ca_der, ca_fingerprint} = Hue.Certificates.bridge_certificate("issuing_ca")
-      port = Hue.Certificates.start_bridge_listener("00178800AABBCCDD", chain: true)
+      # the leaf. The leaf carries a subjectAltName because it must: OTP 28.5
+      # removed the CN-id fallback, and a SAN-less leaf fails the hostname
+      # check closed before :valid_peer can fire. The leaf is not what was
+      # pinned, and this branch is what catches that.
+      {_ca_der, ca_fingerprint} = Hue.Certificates.bridge_certificate("with_san_issuing_ca")
+      port = Hue.Certificates.start_bridge_listener("with_san", chain: "with_san_issuing_ca")
 
       assert :valid_peer in observe_events(port, ca_fingerprint, ~c"localhost")
 
       assert {:fail, :certificate_changed} =
                Transport.verify_pinned(
-                 Hue.Certificates.otp_certificate("00178800AABBCCDD"),
-                 Hue.Certificates.der("00178800AABBCCDD"),
+                 Hue.Certificates.otp_certificate("with_san"),
+                 Hue.Certificates.der("with_san"),
                  :valid_peer,
                  ca_fingerprint
                )

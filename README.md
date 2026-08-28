@@ -77,7 +77,9 @@ def deps do
 end
 ```
 
-Requires Elixir 1.17 or later.
+Requires Elixir 1.17 or later. Tested against Erlang/OTP 28 and 29; OTP 28.5
+changed `:inet_dns` decoding and TLS hostname verification, and 0.2.1 is the
+first release that works on both sides of that line.
 
 ## Quickstart
 

@@ -7,7 +7,7 @@ defmodule Hue.Certificates do
   fixtures reproduce that shape — `C=NL, O=Philips Hue, CN=<bridge id>`, no SAN —
   so the pinning path is exercised against the condition it exists to handle.
 
-  Two issuing shapes are covered, because they take different branches:
+  Three shapes are covered, because they take different branches:
 
     * **self-signed** (`0011223344556677`, `00AABBCCDDEEFF00`, `FFFFFFFFFFFFFFFF`)
       arrives as `{:bad_cert, :selfsigned_peer}`.
@@ -17,6 +17,12 @@ defmodule Hue.Certificates do
       downloaded, so `bridge_issuing_ca.der` is deliberately kept out of the
       trust store in every test but the one that studies what happens when a CA
       *is* supplied.
+    * **signed and carrying a subjectAltName** (`with_san`, issued by
+      `with_san_issuing_ca`, SAN `DNS:localhost`) — the one shape no bridge
+      presents. It exists because OTP 28.5 removed the CN-id hostname
+      fallback, so a SAN-less certificate can no longer reach `:valid_peer`
+      on any current OTP, and the test proving that branch compares the pin
+      needs a live handshake that still produces the event.
 
   They are generated once with `openssl` and committed as DER, rather than
   assembled from ASN.1 records at runtime. Hand-built records track OTP's
@@ -26,6 +32,11 @@ defmodule Hue.Certificates do
       openssl req -x509 -newkey rsa:2048 -nodes -days 7300 -sha256 \\
         -subj "/C=NL/O=Philips Hue/CN=<bridge id>" \\
         -keyout <key> -outform DER -out bridge_<bridge id>.der
+
+  The `with_san` pair differs only in that the leaf's request carries
+  `-addext "subjectAltName=DNS:localhost"` and is signed by
+  `with_san_issuing_ca` (`openssl x509 -req` with an extfile restating the
+  SAN) instead of self-signing.
 
   The expected fingerprints below come from `openssl x509 -fingerprint -sha256`,
   not from `Hue.Transport`, so the fingerprint test compares against an
@@ -52,7 +63,9 @@ defmodule Hue.Certificates do
     "FFFFFFFFFFFFFFFF" => "19b0176ff5be4461cf15626db089ad5ce1af401f6cc5798055522a9a04d466e1",
     "without_common_name" => "bc12a3a5645be5d4a1e7a9d31cf0c23110674a32ec50812507dcc5bfd94ed5df",
     "00178800AABBCCDD" => "2b7a4fb5984f1995bc687fa1099ae5c5e50c84784c4fefcd026b7f215b04e6f3",
-    "issuing_ca" => "6283ffec7437b7fe7f9dad0cb983a24b06871b244a1d98b5eaf302431d646f52"
+    "issuing_ca" => "6283ffec7437b7fe7f9dad0cb983a24b06871b244a1d98b5eaf302431d646f52",
+    "with_san" => "04c64bd0b153314dad35d394dcbcf85dff102d88e73d56d6bcd0c14dc080c2eb",
+    "with_san_issuing_ca" => "2de7d7942297bfac9c6f46e0a5e405f0b1922df48017dc090c19933f832a4ec2"
   }
 
   @doc "Returns `{der, fingerprint}` for the certificate with the given common name."
@@ -84,7 +97,11 @@ defmodule Hue.Certificates do
   with the test.
   """
   def start_bridge_listener(common_name \\ "0011223344556677", options \\ []) do
-    chain = if options[:chain], do: [cacerts: [der("issuing_ca")]], else: []
+    chain =
+      case options[:chain] do
+        nil -> []
+        issuer -> [cacerts: [der(issuer)]]
+      end
 
     {:ok, listen} =
       :ssl.listen(

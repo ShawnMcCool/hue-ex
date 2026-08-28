@@ -175,12 +175,17 @@ defmodule Hue.Transport do
 
   Once the chain is longer and validation gets past its head, the leaf arrives as
   `:valid_peer`, and this branch is the only thing still comparing it to the pin.
-  Reaching it also depends on connecting by name rather than by address: for a
-  certificate with no subjectAltName an IP reference id is dropped before
-  hostname matching, so `:ssl` reports `hostname_check_failed` first, whereas a
-  DNS reference id falls back to CN-ids and lets `:valid_peer` through. Neither
-  condition is exotic — `Hue.Discovery` returns mDNS `.local` names, and nothing
-  here controls what a caller connects to.
+  Reaching it also depends on surviving the hostname check, and what that takes
+  moved in OTP 28.5. Through OTP 28.3, a certificate with no subjectAltName
+  reached by IP lost its reference ids before matching, so `:ssl` reported
+  `hostname_check_failed` first, whereas a DNS reference id fell back to CN-ids
+  and let `:valid_peer` through. OTP 28.5 removed that CN-id fallback (the
+  RFC 9525 direction): with no subjectAltName the check now fails before any
+  match fun is consulted, for every kind of reference id, so only a leaf that
+  carries a subjectAltName can arrive as `:valid_peer`. A SAN-bearing chain is
+  not exotic — nothing here controls what a caller connects to — and a SAN-less
+  one now fails closed either way, just as `hostname_check_failed` instead of
+  through the pin.
 
   Unrecognised events fail closed rather than raising.
   """
@@ -242,13 +247,15 @@ defmodule Hue.Transport do
   you are being intercepted" — for what is actually a benign update.
 
   `customize_hostname_check` cannot disable hostname verification here, contrary
-  to how it is usually described. For a certificate with no subjectAltName
-  reached by IP address, `public_key` drops IP reference ids before the match fun
-  is consulted, so the check fails on an empty list and `:ssl` converts
-  `valid_peer` into `{:bad_cert, :hostname_check_failed}` before this module sees
-  it. It is retained only so that a pinned certificate which *does* chain to a
-  supplied authority is still judged by its fingerprint instead of by a name it
-  was never issued for.
+  to how it is usually described. The match fun is only consulted against
+  identifiers the certificate presents, and a bridge certificate presents none:
+  it has no subjectAltName, and OTP 28.5 removed the CN-id fallback that once
+  stood in for one, so the check fails on an empty list — on any current OTP
+  for every kind of reference id, on older OTP when reached by IP address — and
+  `:ssl` converts `valid_peer` into `{:bad_cert, :hostname_check_failed}`
+  before this module sees it. It is retained only so that a certificate which
+  *does* present a name a caller connected to is still judged by its
+  fingerprint instead of by that name.
   """
   @spec ssl_options(keyword()) :: keyword()
   def ssl_options(options \\ []) do

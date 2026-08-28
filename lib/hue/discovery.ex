@@ -290,14 +290,18 @@ defmodule Hue.Discovery do
   the SRV port is always 443, which is `Hue.Bridge.Info`'s default.
 
   Decoding is `:inet_dns`, which is undocumented `kernel` internals. Verified
-  against OTP 28: `decode/1` defaults to mDNS mode, returns `{:ok, dns_rec}` or
-  `{:error, :formerr}`, and `rr/2` reads `:type` and `:data` off a `dns_rr`.
-  A packet it cannot decode yields `[]` — a malformed multicast packet from
-  something else on the LAN is not this library's problem to report.
+  against OTP 28 and 29: `decode/1` defaults to mDNS mode and `rr/2` reads
+  `:type` and `:data` off a `dns_rr`. What an undecodable packet produces
+  moved between releases: through OTP 28.3 every failure came back as
+  `{:error, reason}`, but OTP 28.5 dropped the clause that caught a packet too
+  short for a DNS header, so that shape now raises `FunctionClauseError`
+  instead. Both mean "not DNS", and both yield `[]` — a malformed multicast
+  packet from something else on the LAN is not this library's problem to
+  report.
   """
   @spec parse_mdns_packet(binary()) :: [String.t()]
   def parse_mdns_packet(packet) when is_binary(packet) do
-    case :inet_dns.decode(packet) do
+    case decode_dns(packet) do
       {:ok, message} ->
         [:anlist, :nslist, :arlist]
         |> Enum.flat_map(&:inet_dns.msg(message, &1))
@@ -309,6 +313,16 @@ defmodule Hue.Discovery do
       {:error, _reason} ->
         []
     end
+  end
+
+  # Folds the two failure shapes `:inet_dns.decode/1` has had into one. OTP
+  # through 28.3 reported every undecodable packet as `{:error, reason}`;
+  # OTP 28.5 dropped the catch-all clause behind that, so a packet shorter
+  # than a DNS header raises out of `do_decode/2` instead.
+  defp decode_dns(packet) do
+    :inet_dns.decode(packet)
+  rescue
+    _not_dns -> {:error, :formerr}
   end
 
   @doc """
