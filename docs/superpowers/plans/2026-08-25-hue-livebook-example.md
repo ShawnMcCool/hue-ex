@@ -53,6 +53,11 @@ An application key is a password. This cell keeps it out of the notebook
 file itself, in `.hue.json` next to the notebook (gitignored in the hue
 repository). Delete that file to start over from discovery.
 
+Saving beside the notebook only works when the notebook is opened from a
+cloned repo (or any saved `.livemd` on disk) — launched via the "Run in
+Livebook" badge, Livebook autosaves to a temporary location, so the
+credentials won't persist across sessions and pairing will repeat.
+
 ```elixir
 creds_path = Path.join(__DIR__, ".hue.json")
 
@@ -72,6 +77,11 @@ parallel, then verifies each candidate with a real connection and pins the
 certificate it finds — the SSH host-key model, because a Hue bridge's
 certificate can't be verified any conventional way. The pin rides along in
 the returned `Hue.Bridge.Info` and every later connection checks against it.
+
+If discovery finds nothing — mDNS is silent on routed networks, with no
+error to explain why — this cell crashes with a `MatchError` on the empty
+list. The escape hatch is `Hue.Discovery.identify/2` with the bridge's IP:
+it captures the fingerprint on first contact the same way `discover/1` does.
 
 On a re-run this cell rebuilds that `Info` from the saved file instead.
 
@@ -117,6 +127,8 @@ application_key =
         application_key: key
       })
     )
+
+    File.chmod!(creds_path, 0o600)
 
     key
   end
@@ -167,9 +179,10 @@ children = [
 
 In Livebook, `Kino.start_child/1` is that same placement. On start the
 bridge fetches everything once to seed its cache, then holds an eventstream
-open to keep it current; `:live` means both are done. Re-running this cell
-errors with `:already_started` — that's your supervision tree telling the
-truth, not a bug. Restart the runtime to start over.
+open to keep it current; `:live` means both are done. Kino ties the child's
+lifetime to this cell rather than to the runtime, so re-running it tears
+down the old bridge and starts a fresh one — no error, no restart required,
+the Livebook analogue of a supervisor restarting a child.
 
 ```elixir
 {:ok, client} = Hue.from_bridge(bridge_info, application_key: application_key)
@@ -177,10 +190,18 @@ truth, not a bug. Restart the runtime to start over.
 
 Enum.reduce_while(1..50, nil, fn _, _ ->
   case Hue.Bridge.status(LivebookHue) do
-    :live -> {:halt, :live}
-    status -> Process.sleep(200) && {:cont, status}
+    :live ->
+      {:halt, :live}
+
+    status ->
+      Process.sleep(200)
+      {:cont, status}
   end
 end)
+|> case do
+  :live -> :live
+  status -> raise "bridge did not reach :live within 10s, last status: #{inspect(status)}"
+end
 ```
 
 ## What's in the house
@@ -337,7 +358,7 @@ the bridge also recomputes group aggregates, so one light produces a
 `grouped_light` event too.
 
 ```elixir
-frame = Kino.frame(placeholder: false)
+frame = Kino.Frame.new(placeholder: false)
 
 {:ok, _listener} =
   Kino.start_child(

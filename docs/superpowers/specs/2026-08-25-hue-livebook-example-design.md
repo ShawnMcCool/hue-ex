@@ -45,6 +45,13 @@ In journey order, each with prose explaining why before code showing how:
    `Kino.Frame` as the reader flips lights in the Hue app, showing the
    eventstream and the cache updating.
 
+> **Corrected after implementation.** Two of the walkthrough details narrowed
+> in the built notebook. Item 4 shows lights, rooms, and scenes but no zones
+> table — many homes have none, and an empty table teaches nothing; zones
+> appear in the control section's `Hue.Zone.set/3` mention instead. Item 5's
+> "on/off buttons" became a checkbox inside a single submit form, which is the
+> Kino idiom for a form that also carries the brightness slider.
+
 ## Re-runnability
 
 Pairing produces the application key and the pinned bridge identity. The
@@ -54,6 +61,19 @@ entirely. This makes the notebook a reusable tool rather than a one-shot demo,
 and it demonstrates the store-and-restore path every real integration needs —
 the application key is a stored credential, which is exactly how a consumer
 like Fae will treat it.
+
+> **Corrected after hardware verification:** the notebooks now save
+> credentials to the platform user config directory via `:filename.basedir/2`
+> (`~/.config/hue_livebooks` on Linux; the walkthrough lists the per-platform
+> paths), not `examples/.hue.json`. Deployed as a Livebook app, a
+> notebook runs from an autosave directory that does not exist on disk, so a
+> notebook-relative path both misses the pairing a normal run already saved
+> and crashes `File.write!` on a missing directory. A first pass added a
+> fallback read of the legacy `examples/.hue.json`; removed before merge —
+> the beside-the-notebook scheme never shipped in a release, so the
+> fallback only ever resurrected the author's own already-migrated file,
+> silently, with no write-through, making "delete the file to start over"
+> false for as long as it existed.
 
 ## Repo integration
 

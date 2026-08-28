@@ -10,3 +10,6 @@ erl_crash.dump
 .elixir_ls/
 # The package tarball mix hex.build writes.
 hue-*.tar
+
+# The Livebook example's saved pairing (an application key is a password).
+/examples/.hue.json

@@ -1,0 +1,286 @@
+# Controlling Philips Hue
+
+```elixir
+Mix.install([
+  {:hue, "~> 0.2"},
+  {:kino, "~> 0.19"}
+])
+```
+
+## What this notebook does
+
+This is the [hue](https://hexdocs.pm/hue) library's worked example: it finds
+your bridge, pairs with it, controls lights by name, and watches state
+changes stream in live. Run it top to bottom against a real bridge on your
+network.
+
+The first run pairs — you'll press the bridge's round link button once. The
+result is saved to your user config directory, so every later run
+reconnects without asking.
+
+## Saved credentials
+
+An application key is a password. This cell keeps it out of the notebook
+file itself, in your platform's user config directory under
+`hue_livebooks/hue.json` — so every copy of these notebooks, cloned,
+badge-launched, or deployed as a Livebook app, shares one pairing:
+
+* Linux — `~/.config/hue_livebooks/hue.json`
+* macOS — `~/Library/Application Support/hue_livebooks/hue.json`
+* Windows — `%APPDATA%\hue_livebooks\hue.json`
+
+Delete that file to start over from discovery.
+
+```elixir
+creds_path =
+  Path.join(to_string(:filename.basedir(:user_config, "hue_livebooks")), "hue.json")
+
+saved =
+  case File.read(creds_path) do
+    {:ok, json} -> Jason.decode!(json)
+    {:error, :enoent} -> nil
+    {:error, reason} -> raise "could not read #{creds_path}: #{inspect(reason)}"
+  end
+
+if saved, do: :reconnecting, else: :first_run
+```
+
+## Find the bridge
+
+`Hue.Discovery.discover/1` runs mDNS and Philips' cloud endpoint in
+parallel, then verifies each candidate with a real connection and pins the
+certificate it finds — the SSH host-key model, because a Hue bridge's
+certificate can't be verified any conventional way. The pin rides along in
+the returned `Hue.Bridge.Info` and every later connection checks against it.
+
+If discovery finds nothing — mDNS is silent on routed networks, with no
+error to explain why — this cell crashes with a `MatchError` on the empty
+list. The escape hatch is `Hue.Discovery.identify/2` with the bridge's IP:
+it captures the fingerprint on first contact the same way `discover/1` does.
+
+On a re-run this cell rebuilds that `Info` from the saved file instead.
+
+```elixir
+bridge_info =
+  if saved do
+    %Hue.Bridge.Info{
+      host: saved["host"],
+      port: saved["port"],
+      bridge_id: saved["bridge_id"],
+      fingerprint: saved["fingerprint"]
+    }
+  else
+    {:ok, [first | _]} = Hue.Discovery.discover()
+    first
+  end
+```
+
+## Pair
+
+**Press the round link button on your bridge, then run this cell** — the
+bridge only honours pairing requests for about thirty seconds after a
+press, and this cell polls for up to a minute, so either order works if
+you're quick.
+
+On a re-run, the saved key is used and nothing is sent to the bridge.
+
+```elixir
+application_key =
+  if saved do
+    saved["application_key"]
+  else
+    {:ok, %{application_key: key}} =
+      Hue.Pairing.pair_when_pressed(bridge_info, app: "livebook")
+
+    File.mkdir_p!(Path.dirname(creds_path))
+
+    File.write!(
+      creds_path,
+      Jason.encode!(%{
+        host: bridge_info.host,
+        port: bridge_info.port,
+        bridge_id: bridge_info.bridge_id,
+        fingerprint: bridge_info.fingerprint,
+        application_key: key
+      })
+    )
+
+    File.chmod!(creds_path, 0o600)
+
+    key
+  end
+
+:paired
+```
+
+## Start the live bridge
+
+`Hue.Bridge` never starts itself — it's a `child_spec` you place in your own
+supervision tree, the way Finch or Redix are. In an application that looks
+like:
+
+<!-- livebook:{"force_markdown":true} -->
+
+```elixir
+children = [
+  {Hue.Bridge, name: MyApp.Hue, client: client}
+]
+```
+
+In Livebook, `Kino.start_child/1` is that same placement. On start the
+bridge fetches everything once to seed its cache, then holds an eventstream
+open to keep it current; `:live` means both are done. Kino ties the child's
+lifetime to this cell rather than to the runtime, so re-running it tears
+down the old bridge and starts a fresh one — no error, no restart required,
+the Livebook analogue of a supervisor restarting a child.
+
+```elixir
+{:ok, client} = Hue.from_bridge(bridge_info, application_key: application_key)
+{:ok, _supervisor} = Kino.start_child({Hue.Bridge, name: LivebookHue, client: client})
+
+Enum.reduce_while(1..50, nil, fn _, _ ->
+  case Hue.Bridge.status(LivebookHue) do
+    :live ->
+      {:halt, :live}
+
+    status ->
+      Process.sleep(200)
+      {:cont, status}
+  end
+end)
+|> case do
+  :live -> :live
+  status -> raise "bridge did not reach :live within 10s, last status: #{inspect(status)}"
+end
+```
+
+## What's in the house
+
+Reads are `:ets.lookup` calls in your own process — they never touch the
+bridge or even the bridge's process. A light's own `metadata` is deprecated
+in CLIP v2, so names are resolved through the owning device, which
+`Hue.Bridge.name_of/3` does for you.
+
+```elixir
+{:ok, lights} = Hue.Light.list(LivebookHue)
+
+lights
+|> Enum.map(fn light ->
+  %{
+    name: Hue.Bridge.name_of(LivebookHue, :light, light["id"]),
+    on: get_in(light, ["on", "on"]),
+    brightness: get_in(light, ["dimming", "brightness"])
+  }
+end)
+|> Enum.sort_by(& &1.name)
+|> Kino.DataTable.new(name: "Lights")
+```
+
+Rooms and scenes carry their own authoritative names:
+
+```elixir
+{:ok, rooms} = Hue.Room.list(LivebookHue)
+{:ok, scenes} = Hue.Scene.list(LivebookHue)
+
+Kino.Layout.grid(
+  [
+    Kino.DataTable.new(
+      Enum.map(rooms, &%{room: get_in(&1, ["metadata", "name"])}),
+      name: "Rooms"
+    ),
+    Kino.DataTable.new(
+      Enum.map(scenes, &%{scene: get_in(&1, ["metadata", "name"])}),
+      name: "Scenes"
+    )
+  ],
+  columns: 2
+)
+```
+
+## Control, by name
+
+Pick one of your lights from the table above and use its name here. Writes
+accept `:on`, `:brightness` (percent), `:color` (hex, RGB tuple, or xy),
+`:kelvin`, and `:transition` (milliseconds). A capability the light doesn't
+have — colour on a white-only bulb — returns `{:error, %Hue.Error{}}`; a
+malformed value raises, because that's a bug in the code, not a fact about
+the bulb.
+
+```elixir
+light = "Desk Lamp"
+
+:ok = Hue.Light.set(LivebookHue, light, on: true, brightness: 40)
+```
+
+`set` returns when the write is accepted, not when the light has changed —
+writes are coalesced and paced so a burst never floods the bridge. When you
+need confirmation, `await: true` blocks until the confirming event comes
+back down the eventstream:
+
+```elixir
+Hue.Light.set(LivebookHue, light, color: "#ff8800", transition: 400, await: true)
+```
+
+Rooms, zones, and scenes work the same way — `Hue.Room.set/3`,
+`Hue.Zone.set/3`, `Hue.Scene.recall/3`:
+
+```elixir
+# :ok = Hue.Room.set(LivebookHue, "Living Room", on: false)
+# :ok = Hue.Scene.recall(LivebookHue, "Relax")
+:skipped
+```
+
+## A control panel, elsewhere
+
+Driving lights from forms is a different job from learning the API, so it
+has its own notebook: [`control_panel.livemd`](control_panel.livemd) is a
+full interface to your bridge — rooms, lights, scenes, management — and it
+reuses the credentials this notebook just saved, so it connects without
+pairing again.
+
+## Watch it live
+
+Subscribing delivers `{:hue, %Hue.Event{}}` to the calling process, and the
+subscription dies with that process — so the listener below is a supervised
+task that subscribes itself. Flip a light in the Hue app, or re-run the set
+calls above, and watch the deltas arrive. Notice a single change fans out:
+the bridge also recomputes group aggregates, so one light produces a
+`grouped_light` event too.
+
+```elixir
+frame = Kino.Frame.new(placeholder: false)
+
+{:ok, _listener} =
+  Kino.start_child(
+    {Task,
+     fn ->
+       :ok = Hue.Bridge.subscribe(LivebookHue)
+
+       Stream.repeatedly(fn ->
+         receive do
+           {:hue, event} ->
+             name = Hue.Bridge.name_of(LivebookHue, event.resource_type, event.rid)
+
+             Kino.Frame.append(
+               frame,
+               Kino.Markdown.new(
+                 "`#{event.resource_type}` **#{name || event.rid}** → `#{inspect(event.data)}`"
+               )
+             )
+         end
+       end)
+       |> Stream.run()
+     end}
+  )
+
+frame
+```
+
+## Where to next
+
+Everything this notebook did, your application does with the same calls:
+put `{Hue.Bridge, name: MyApp.Hue, client: client}` in your supervision
+tree, store the application key like the password it is, and read the
+[moduledocs](https://hexdocs.pm/hue) — `Hue.Bridge` for the live model and
+its failure semantics, `Hue.Light` for writes, `Hue.Resource` for the
+stateless layer-1 escape hatch this notebook never needed.

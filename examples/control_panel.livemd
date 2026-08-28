@@ -1,0 +1,1138 @@
+<!-- livebook:{"app_settings":{"access_type":"public","slug":"hue-panel"}} -->
+
+# Hue Control Panel
+
+```elixir
+Mix.install([
+  {:hue, "~> 0.2"},
+  {:kino, "~> 0.19"}
+])
+```
+
+## Setup & Connect
+
+Deploy as a Livebook app (the app icon in the sidebar) to run everything
+and see only the panel. In the editor, press `e a` to run all — every cell
+is required.
+
+Credentials load from your platform's user config directory, shared with
+the walkthrough (its "Saved credentials" section lists the per-platform
+paths). First run discovers the bridge and pairs — press the round link
+button when asked.
+
+```elixir
+creds_path =
+  Path.join(to_string(:filename.basedir(:user_config, "hue_livebooks")), "hue.json")
+
+saved =
+  case File.read(creds_path) do
+    {:ok, json} -> Jason.decode!(json)
+    {:error, :enoent} -> nil
+    {:error, reason} -> raise "could not read #{creds_path}: #{inspect(reason)}"
+  end
+
+{bridge_info, application_key} =
+  if saved do
+    {%Hue.Bridge.Info{
+       host: saved["host"],
+       port: saved["port"],
+       bridge_id: saved["bridge_id"],
+       fingerprint: saved["fingerprint"]
+     }, saved["application_key"]}
+  else
+    {:ok, [info | _]} = Hue.Discovery.discover()
+    IO.puts("Press the round link button on the bridge…")
+    {:ok, %{application_key: key}} = Hue.Pairing.pair_when_pressed(info, app: "livebook")
+
+    File.mkdir_p!(Path.dirname(creds_path))
+
+    File.write!(
+      creds_path,
+      Jason.encode!(%{
+        host: info.host,
+        port: info.port,
+        bridge_id: info.bridge_id,
+        fingerprint: info.fingerprint,
+        application_key: key
+      })
+    )
+
+    File.chmod!(creds_path, 0o600)
+    {info, key}
+  end
+
+{:ok, client} = Hue.from_bridge(bridge_info, application_key: application_key)
+{:ok, _} = Kino.start_child({Hue.Bridge, name: HuePanel, client: client})
+
+Enum.reduce_while(1..50, nil, fn _, _ ->
+  case Hue.Bridge.status(HuePanel) do
+    :live ->
+      {:halt, :live}
+
+    {:error, _} = err ->
+      {:halt, err}
+
+    status ->
+      Process.sleep(200)
+      {:cont, status}
+  end
+end)
+|> case do
+  :live -> :live
+  status -> raise "bridge did not reach :live, status: #{inspect(status)}"
+end
+```
+
+## Engine
+
+`Panel` renders every dynamic region from the cache; controls report through
+`Panel.report_result/3`, and the router calls the `render_*` functions when
+the cache changes.
+
+```elixir
+defmodule Panel do
+  @bridge HuePanel
+
+  # -- status line ---------------------------------------------------------
+
+  def report(ui, text) do
+    Kino.Frame.render(ui.status, Kino.Markdown.new("**#{text}**"))
+  end
+
+  def report_result(ui, label, :ok), do: report(ui, "#{label} ✓")
+
+  def report_result(ui, label, {:error, %Hue.Error{reason: reason}}),
+    do: report(ui, "#{label} — #{reason}")
+
+  def report_result(ui, label, {:error, other}),
+    do: report(ui, "#{label} — #{inspect(other)}")
+
+  # -- naming --------------------------------------------------------------
+
+  def name(type, rid), do: Hue.Bridge.name_of(@bridge, type, rid) || rid
+
+  # -- the lights a room's devices carry -----------------------------------
+
+  def lights_in_room(room) do
+    for %{"rid" => device_rid, "rtype" => "device"} <- room["children"] || [],
+        {:ok, device} <- [Hue.Bridge.fetch(@bridge, :device, device_rid)],
+        %{"rid" => light_rid, "rtype" => "light"} <- device["services"] || [],
+        {:ok, light} <- [Hue.Bridge.fetch(@bridge, :light, light_rid)],
+        do: light
+  end
+
+  # -- rooms ---------------------------------------------------------------
+
+  def group_state_line(type, group) do
+    case Hue.Bridge.grouped_light(@bridge, type, group["id"]) do
+      {:ok, gl} ->
+        on = if get_in(gl, ["on", "on"]), do: "on", else: "off"
+        bri = get_in(gl, ["dimming", "brightness"])
+        if bri, do: "#{on} · #{round(bri)}%", else: on
+
+      {:error, _} ->
+        "no lights"
+    end
+  end
+
+  def render_group_states(group_frames) do
+    for {{type, rid}, frame} <- group_frames do
+      case Hue.Bridge.fetch(@bridge, type, rid) do
+        {:ok, group} ->
+          Kino.Frame.render(frame, Kino.Markdown.new(group_state_line(type, group)))
+
+        {:error, _} ->
+          Kino.Frame.render(frame, Kino.Markdown.new("*(deleted)*"))
+      end
+    end
+
+    :ok
+  end
+
+  # -- lights --------------------------------------------------------------
+
+  def light_state_line(rid) do
+    case Hue.Bridge.fetch(@bridge, :light, rid) do
+      {:ok, light} ->
+        on = if get_in(light, ["on", "on"]), do: "on", else: "off"
+        bri = get_in(light, ["dimming", "brightness"])
+        xy = get_in(light, ["color", "xy"])
+        mirek = get_in(light, ["color_temperature", "mirek"])
+
+        [
+          on,
+          bri && "#{round(bri)}%",
+          xy && "xy #{Float.round(xy["x"], 3)},#{Float.round(xy["y"], 3)}",
+          mirek && "#{mirek} mirek",
+          connectivity_status(light)
+        ]
+        |> Enum.reject(&is_nil/1)
+        |> Enum.join(" · ")
+
+      {:error, _} ->
+        "*(deleted)*"
+    end
+  end
+
+  def render_light_state(ui, rid) do
+    Kino.Frame.render(ui.light_state, Kino.Markdown.new(light_state_line(rid)))
+  end
+
+  # v2 has no reachability field on :light itself — "reachable" lives on the
+  # owning device's zigbee_connectivity service. Every step degrades to nil
+  # rather than crashing: a device with no such service (e.g. a zgp remote),
+  # a cache miss mid-topology-change, or simply the normal "connected" case,
+  # which is deliberately silent so the line doesn't get noisier for the
+  # common state.
+  defp connectivity_status(light) do
+    with %{"rid" => device_rid} <- light["owner"],
+         {:ok, device} <- Hue.Bridge.fetch(@bridge, :device, device_rid),
+         %{"rid" => zc_rid} <-
+           Enum.find(device["services"] || [], &(&1["rtype"] == "zigbee_connectivity")),
+         {:ok, zc} <- Hue.Bridge.fetch(@bridge, :zigbee_connectivity, zc_rid),
+         status when status != "connected" <- zc["status"] do
+      status
+    else
+      _ -> nil
+    end
+  end
+
+  # -- scenes --------------------------------------------------------------
+
+  def scene_action(light) do
+    action =
+      %{"on" => %{"on" => get_in(light, ["on", "on"])}}
+      |> then(fn a ->
+        if bri = get_in(light, ["dimming", "brightness"]),
+          do: Map.put(a, "dimming", %{"brightness" => bri}),
+          else: a
+      end)
+      |> then(fn a ->
+        cond do
+          mirek = get_in(light, ["color_temperature", "mirek"]) ->
+            Map.put(a, "color_temperature", %{"mirek" => mirek})
+
+          xy = get_in(light, ["color", "xy"]) ->
+            Map.put(a, "color", %{"xy" => xy})
+
+          true ->
+            a
+        end
+      end)
+
+    %{"target" => %{"rid" => light["id"], "rtype" => "light"}, "action" => action}
+  end
+
+  # -- management ------------------------------------------------------------
+
+  # A light's own name is deprecated in CLIP v2; the authoritative name lives
+  # on the device that owns it (`Hue.Bridge.Names`'s moduledoc), reached the
+  # same way the blink handler in Lights reaches it — via the light's "owner".
+  def light_owner_rid(rid) do
+    case Hue.Bridge.fetch(@bridge, :light, rid) do
+      {:ok, %{"owner" => %{"rid" => device_rid}}} -> device_rid
+      _ -> nil
+    end
+  end
+
+  def render_device_status(ui) do
+    status =
+      case Hue.Bridge.list(@bridge, :zigbee_device_discovery) do
+        {:ok, [discovery]} -> discovery["status"]
+        _ -> nil
+      end
+
+    Kino.Frame.render(ui.device_status, Kino.Markdown.new(status || "unknown"))
+  end
+
+  # -- activity ------------------------------------------------------------
+
+  @activity_cap 50
+
+  def describe(%Hue.Event{type: :error, resource_type: rt, rid: rid, data: %Hue.Error{reason: reason}}) do
+    "`#{rt}` **#{name(rt, rid)}** — write failed: #{reason}"
+  end
+
+  def describe(%Hue.Event{type: t, resource_type: rt, rid: rid, data: data}) do
+    what =
+      cond do
+        get_in(data, ["on", "on"]) == true -> "on"
+        get_in(data, ["on", "on"]) == false -> "off"
+        get_in(data, ["dimming", "brightness"]) -> "#{round(get_in(data, ["dimming", "brightness"]))}%"
+        get_in(data, ["metadata", "name"]) -> "renamed to #{get_in(data, ["metadata", "name"])}"
+        true -> to_string(t)
+      end
+
+    "`#{rt}` **#{name(rt, rid)}** — #{what}"
+  end
+
+  def render_activity(ui, history) do
+    history = Enum.take(history, @activity_cap)
+    Kino.Frame.render(ui.activity, Kino.Markdown.new(Enum.join(history, "\n\n")))
+    history
+  end
+end
+```
+
+```elixir
+ui = %{
+  status: Kino.Frame.new(placeholder: false),
+  rooms: Kino.Frame.new(),
+  light_state: Kino.Frame.new(placeholder: false),
+  scenes: Kino.Frame.new(),
+  management: Kino.Frame.new(),
+  device_status: Kino.Frame.new(placeholder: false),
+  activity: Kino.Frame.new()
+}
+```
+
+One row per room and zone — name, live state, On/Off, brightness — rebuilt
+whenever a room or zone is added or deleted, so a group created through
+Management shows up here without re-running this cell.
+
+```elixir
+# Rebuilt (not re-rendered) on room/zone add/delete; group_frames_ref always
+# holds the current generation, so the router's render_group_states call
+# never reads a binding captured before the last rebuild.
+{:ok, room_listeners} = Kino.start_child({Agent, fn -> [] end})
+{:ok, group_frames_ref} = Kino.start_child({Agent, fn -> %{} end})
+
+set_group = fn
+  :room, target, opts -> Hue.Room.set(HuePanel, target, opts)
+  :zone, target, opts -> Hue.Zone.set(HuePanel, target, opts)
+end
+
+rebuild_rooms = fn ->
+  Enum.each(Agent.get(room_listeners, & &1), &Kino.terminate_child/1)
+  Agent.update(room_listeners, fn _ -> [] end)
+  Agent.update(group_frames_ref, fn _ -> %{} end)
+
+  register = fn pid -> Agent.update(room_listeners, &[pid | &1]) end
+
+  {:ok, rooms} = Hue.Room.list(HuePanel)
+  {:ok, zones} = Hue.Zone.list(HuePanel)
+
+  groups =
+    Enum.map(rooms, &{:room, &1}) ++ Enum.map(zones, &{:zone, &1})
+
+  group_frames =
+    Map.new(groups, fn {type, g} -> {{type, g["id"]}, Kino.Frame.new(placeholder: false)} end)
+
+  room_rows =
+    for {type, g} <- groups do
+      gname = get_in(g, ["metadata", "name"])
+      state_frame = group_frames[{type, g["id"]}]
+
+      on = Kino.Control.button("On")
+      off = Kino.Control.button("Off")
+      bri = Kino.Control.form([brightness: Kino.Input.range("", min: 1, max: 100, default: 50)], report_changes: true)
+
+      register.(
+        Kino.listen(on, fn _ ->
+          Panel.report_result(ui, "#{gname} → on", set_group.(type, g["id"], on: true))
+        end)
+      )
+
+      register.(
+        Kino.listen(off, fn _ ->
+          Panel.report_result(ui, "#{gname} → off", set_group.(type, g["id"], on: false))
+        end)
+      )
+
+      register.(
+        Kino.listen(bri, fn %{data: %{brightness: b}} ->
+          Panel.report_result(ui, "#{gname} → #{round(b)}%", set_group.(type, g["id"], brightness: b))
+        end)
+      )
+
+      Kino.Layout.grid(
+        [Kino.Markdown.new("**#{gname}**"), state_frame, on, off, bri],
+        columns: 5
+      )
+    end
+
+  Kino.Frame.render(ui.rooms, Kino.Layout.grid(room_rows, columns: 1))
+  Agent.update(group_frames_ref, fn _ -> group_frames end)
+  Panel.render_group_states(group_frames)
+end
+
+rebuild_rooms.()
+```
+
+Pick a light, watch its state, and drive it — the picker's selection lives
+in an `Agent` so the router knows which state line to refresh.
+
+```elixir
+{:ok, lights} = Hue.Light.list(HuePanel)
+
+light_options =
+  lights
+  |> Enum.map(fn l -> {l["id"], Panel.name(:light, l["id"])} end)
+  |> Enum.sort_by(&elem(&1, 1))
+
+{:ok, selected_light} = Kino.start_child({Agent, fn -> elem(hd(light_options), 0) end})
+
+picker = Kino.Control.form([light: Kino.Input.select("Light", light_options)], report_changes: true)
+
+controls =
+  Kino.Control.form(
+    [
+      on: Kino.Input.checkbox("On", default: true),
+      brightness: Kino.Input.range("Brightness", min: 1, max: 100, default: 50),
+      color: Kino.Input.color("Colour", default: "#ffd08a"),
+      kelvin: Kino.Input.range("Kelvin", min: 2000, max: 6500, default: 2700),
+      use_color: Kino.Input.checkbox("Set colour (else colour temperature)", default: true),
+      transition: Kino.Input.number("Transition ms", default: 400, min: 0)
+    ],
+    submit: "Apply"
+  )
+
+blink = Kino.Control.button("Blink to identify")
+
+Kino.listen(picker, fn %{data: %{light: rid}} ->
+  Agent.update(selected_light, fn _ -> rid end)
+  Panel.render_light_state(ui, rid)
+end)
+
+Kino.listen(controls, fn %{data: d} ->
+  rid = Agent.get(selected_light, & &1)
+
+  opts =
+    [on: d.on, brightness: d.brightness] ++
+      (if d.transition, do: [transition: round(d.transition)], else: []) ++
+      if(d.use_color, do: [color: d.color], else: [kelvin: round(d.kelvin)])
+
+  Panel.report_result(ui, "#{Panel.name(:light, rid)} → apply", Hue.Light.set(HuePanel, rid, opts))
+end)
+
+Kino.listen(blink, fn _ ->
+  rid = Agent.get(selected_light, & &1)
+
+  case Hue.Bridge.fetch(HuePanel, :light, rid) do
+    {:ok, light} ->
+      %{"rid" => device_rid} = light["owner"]
+
+      result = Hue.Resource.update(client, :device, device_rid, %{"identify" => %{"action" => "identify"}})
+      Panel.report_result(ui, "#{Panel.name(:light, rid)} → blink", result)
+
+    {:error, err} ->
+      Panel.report_result(ui, "blink", {:error, err})
+  end
+end)
+
+Panel.render_light_state(ui, elem(hd(light_options), 0))
+
+lights_tab =
+  Kino.Layout.grid([picker, ui.light_state, controls, blink], columns: 1)
+```
+
+Scenes are room-owned: recall drives every light that room's devices carry
+to its captured state; a per-room form saves the current state as a new
+scene.
+
+```elixir
+# Rebuilt (not re-rendered) on scene add/delete — Kino ties a control's
+# lifetime to its creating pid/cell, not to whether it's still rendered, so
+# the previous batch's listeners are terminated first or they'd leak.
+{:ok, scene_listeners} = Kino.start_child({Agent, fn -> [] end})
+
+save_scene = fn room, name ->
+  actions = room |> Panel.lights_in_room() |> Enum.map(&Panel.scene_action/1)
+
+  Hue.Resource.create(client, :scene, %{
+    "metadata" => %{"name" => name},
+    "group" => %{"rid" => room["id"], "rtype" => "room"},
+    "actions" => actions
+  })
+end
+
+rebuild_scenes = fn ->
+  # Accepted race: a click landing while this replaces its button is
+  # dropped — the reappearing row is the signal to re-click.
+  Enum.each(Agent.get(scene_listeners, & &1), &Kino.terminate_child/1)
+  Agent.update(scene_listeners, fn _ -> [] end)
+
+  register = fn pid -> Agent.update(scene_listeners, &[pid | &1]) end
+
+  {:ok, scenes} = Hue.Scene.list(HuePanel)
+  {:ok, rooms} = Hue.Room.list(HuePanel)
+
+  by_group = Enum.group_by(scenes, & &1["group"]["rid"])
+  room_ids = MapSet.new(rooms, & &1["id"])
+
+  scene_row = fn scene ->
+    name = get_in(scene, ["metadata", "name"])
+    button = Kino.Control.button("Recall")
+
+    # Renames arrive as :update (no rebuild), so a label can go stale here —
+    # recall keys on rid, not name, so it still recalls the right scene.
+    register.(
+      Kino.listen(button, fn _ ->
+        Panel.report_result(ui, "recall #{name}", Hue.Scene.recall(HuePanel, scene["id"]))
+      end)
+    )
+
+    Kino.Layout.grid([Kino.Markdown.new(name), button], columns: 2)
+  end
+
+  group_block = fn heading, group_scenes, save_room ->
+    rows = Enum.map(group_scenes, scene_row)
+
+    save_row =
+      if save_room do
+        form =
+          Kino.Control.form([name: Kino.Input.text("New scene from current state")], submit: "Save")
+
+        register.(
+          Kino.listen(form, fn %{data: %{name: name}} ->
+            result = save_scene.(save_room, name)
+            outcome = if match?({:ok, _}, result), do: :ok, else: result
+            Panel.report_result(ui, "save \"#{name}\"", outcome)
+          end)
+        )
+
+        [form]
+      else
+        []
+      end
+
+    Kino.Layout.grid([Kino.Markdown.new("**#{heading}**")] ++ rows ++ save_row, columns: 1)
+  end
+
+  room_blocks =
+    for room <- rooms do
+      group_block.(get_in(room, ["metadata", "name"]), Map.get(by_group, room["id"], []), room)
+    end
+
+  leftover_blocks =
+    for {group_rid, group_scenes} <- by_group, not MapSet.member?(room_ids, group_rid) do
+      %{"rtype" => rtype} = hd(group_scenes)["group"]
+
+      group_type =
+        case rtype do
+          "room" -> :room
+          "zone" -> :zone
+          _ -> nil
+        end
+
+      heading = if group_type, do: Panel.name(group_type, group_rid), else: group_rid
+      group_block.(heading, group_scenes, nil)
+    end
+
+  Kino.Frame.render(ui.scenes, Kino.Layout.grid(room_blocks ++ leftover_blocks, columns: 1))
+end
+
+rebuild_scenes.()
+```
+
+The layer-1 escape hatch: rename, room/zone create and membership editing,
+device search and delete — tiered by consequence (instant · confirm click ·
+type-to-confirm).
+
+```elixir
+# Registered the instant each listener/Agent is created (not collected and
+# stored in bulk at the end), so a rebuild that raises partway still leaves
+# what it built registered for the next rebuild's terminate-first cleanup.
+{:ok, management_listeners} = Kino.start_child({Agent, fn -> [] end})
+
+# Reset to nil right after the terminate step (below), before any new
+# control exists — so a crash before the end-of-rebuild update leaves
+# refresh_membership pointing at nothing (a safe no-op), not a killed pid.
+{:ok, membership_refs} = Kino.start_child({Agent, fn -> %{room: nil, zone: nil} end})
+
+# Rooms group devices, zones group lights (confirmed against
+# full_state.json) — membership editing follows that split rather than one
+# editor pretending the two are the same shape.
+render_members = fn type, rid, frame ->
+  content =
+    case Hue.Bridge.fetch(HuePanel, type, rid) do
+      {:ok, group} ->
+        case group["children"] || [] do
+          [] ->
+            "*(no members)*"
+
+          children ->
+            children
+            |> Enum.map(fn %{"rid" => crid, "rtype" => crtype} ->
+              Panel.name(Hue.Resource.type(crtype), crid)
+            end)
+            |> Enum.map_join("\n", &"- #{&1}")
+        end
+
+      {:error, _} ->
+        "*(deleted)*"
+    end
+
+  Kino.Frame.render(frame, Kino.Markdown.new(content))
+end
+
+refresh_membership = fn ->
+  case Agent.get(membership_refs, & &1.room) do
+    nil -> :ok
+    %{state: state, frame: frame} -> render_members.(:room, Agent.get(state, & &1.group), frame)
+  end
+
+  case Agent.get(membership_refs, & &1.zone) do
+    nil -> :ok
+    %{state: state, frame: frame} -> render_members.(:zone, Agent.get(state, & &1.group), frame)
+  end
+end
+
+rebuild_management = fn ->
+  Enum.each(Agent.get(management_listeners, & &1), &Kino.terminate_child/1)
+  Agent.update(management_listeners, fn _ -> [] end)
+  Agent.update(membership_refs, fn _ -> %{room: nil, zone: nil} end)
+
+  register = fn pid -> Agent.update(management_listeners, &[pid | &1]) end
+
+  archetypes = ~w(bedroom downstairs garden kitchen living_room office toilet tv other)
+
+  {:ok, rooms} = Hue.Room.list(HuePanel)
+  {:ok, zones} = Hue.Zone.list(HuePanel)
+  {:ok, scenes} = Hue.Scene.list(HuePanel)
+  {:ok, lights} = Hue.Light.list(HuePanel)
+  {:ok, devices} = Hue.Bridge.list(HuePanel, :device)
+
+  device_options =
+    devices
+    |> Enum.map(&{&1["id"], Panel.name(:device, &1["id"])})
+    |> Enum.sort_by(&elem(&1, 1))
+
+  light_options =
+    lights
+    |> Enum.map(&{&1["id"], Panel.name(:light, &1["id"])})
+    |> Enum.sort_by(&elem(&1, 1))
+
+  room_options =
+    rooms
+    |> Enum.map(&{&1["id"], get_in(&1, ["metadata", "name"])})
+    |> Enum.sort_by(&elem(&1, 1))
+
+  zone_options =
+    zones
+    |> Enum.map(&{&1["id"], get_in(&1, ["metadata", "name"])})
+    |> Enum.sort_by(&elem(&1, 1))
+
+  # ---- Rename ----
+
+  # CLIP v2's authoritative name lives on the device, not the light
+  # (Hue.Bridge.Names) — renaming a "light" here renames its owning device,
+  # so every light that device carries is renamed too.
+  light_rename_options =
+    for l <- lights, owner_rid = Panel.light_owner_rid(l["id"]), owner_rid do
+      {"light:#{owner_rid}", "light: #{Panel.name(:light, l["id"])}"}
+    end
+
+  rename_options =
+    Enum.uniq_by(light_rename_options, &elem(&1, 0)) ++
+      Enum.map(rooms, &{"room:#{&1["id"]}", "room: #{get_in(&1, ["metadata", "name"])}"}) ++
+      Enum.map(zones, &{"zone:#{&1["id"]}", "zone: #{get_in(&1, ["metadata", "name"])}"}) ++
+      Enum.map(scenes, &{"scene:#{&1["id"]}", "scene: #{get_in(&1, ["metadata", "name"])}"})
+
+  rename_block =
+    if rename_options == [] do
+      Kino.Markdown.new("*(nothing to rename)*")
+    else
+      # Kino forms can't repopulate one field from another's live selection,
+      # so type folds into the option value as "type:rid" (rids never
+      # contain a colon) instead of a type-select that could never filter.
+      rename_form =
+        Kino.Control.form(
+          [
+            resource: Kino.Input.select("Resource", rename_options),
+            name: Kino.Input.text("New name")
+          ],
+          submit: "Apply"
+        )
+
+      register.(
+        Kino.listen(rename_form, fn %{data: %{resource: ref, name: new_name}} ->
+          [type_str, rid] = String.split(ref, ":", parts: 2)
+
+          type =
+            case type_str do
+              "light" -> :device
+              "room" -> :room
+              "zone" -> :zone
+              "scene" -> :scene
+            end
+
+          result = Hue.Resource.update(client, type, rid, %{"metadata" => %{"name" => new_name}})
+          Panel.report_result(ui, "rename to \"#{new_name}\"", result)
+        end)
+      )
+
+      Kino.Layout.grid([rename_form], columns: 1)
+    end
+
+  # ---- Rooms & zones: create ----
+
+  create_form =
+    Kino.Control.form(
+      [
+        name: Kino.Input.text("Name"),
+        archetype: Kino.Input.select("Archetype", Enum.map(archetypes, &{&1, &1})),
+        kind: Kino.Input.select("Kind", [{"room", "Room"}, {"zone", "Zone"}])
+      ],
+      submit: "Create"
+    )
+
+  register.(
+    Kino.listen(create_form, fn %{data: %{name: name, archetype: archetype, kind: kind}} ->
+      type = if kind == "zone", do: :zone, else: :room
+      body = %{"metadata" => %{"name" => name, "archetype" => archetype}, "children" => []}
+      result = Hue.Resource.create(client, type, body)
+      outcome = if match?({:ok, _}, result), do: :ok, else: result
+      Panel.report_result(ui, "create #{kind} \"#{name}\"", outcome)
+    end)
+  )
+
+  # ---- Rooms & zones: room membership (devices) ----
+
+  {room_membership_block, room_ref} =
+    if room_options == [] or device_options == [] do
+      {Kino.Markdown.new("*(no rooms or no devices yet)*"), nil}
+    else
+      # Kino.Input.read/1 only works from the cell's own evaluation process,
+      # not a listener — so selection is tracked in this Agent instead.
+      {:ok, room_membership_state} =
+        Kino.start_child(
+          {Agent,
+           fn ->
+             %{group: elem(hd(room_options), 0), member: elem(hd(device_options), 0)}
+           end}
+        )
+
+      register.(room_membership_state)
+
+      room_group_select = Kino.Input.select("Room", room_options)
+      room_device_select = Kino.Input.select("Device", device_options)
+      room_members_frame = Kino.Frame.new(placeholder: false)
+      room_add_button = Kino.Control.button("Add to room")
+      room_remove_button = Kino.Control.button("Remove from room")
+
+      register.(
+        Kino.listen(room_group_select, fn %{value: rid} ->
+          Agent.update(room_membership_state, &Map.put(&1, :group, rid))
+          render_members.(:room, rid, room_members_frame)
+        end)
+      )
+
+      register.(
+        Kino.listen(room_device_select, fn %{value: rid} ->
+          Agent.update(room_membership_state, &Map.put(&1, :member, rid))
+        end)
+      )
+
+      register.(
+        Kino.listen(room_add_button, fn _ ->
+          # Measured against real hardware: writing a device into a new
+          # room auto-removes it from its old room in the same stroke, and
+          # rewrites the old room's scenes to drop that light's actions.
+          %{group: group_rid, member: member_rid} = Agent.get(room_membership_state, & &1)
+
+          result =
+            case Hue.Bridge.fetch(HuePanel, :room, group_rid) do
+              {:ok, room} ->
+                children = room["children"] || []
+
+                if Enum.any?(children, &(&1["rid"] == member_rid)) do
+                  :ok
+                else
+                  new_children = children ++ [%{"rid" => member_rid, "rtype" => "device"}]
+                  Hue.Resource.update(client, :room, group_rid, %{"children" => new_children})
+                end
+
+              {:error, _} = err ->
+                err
+            end
+
+          Panel.report_result(
+            ui,
+            "add #{Panel.name(:device, member_rid)} to #{Panel.name(:room, group_rid)}",
+            result
+          )
+        end)
+      )
+
+      register.(
+        Kino.listen(room_remove_button, fn _ ->
+          %{group: group_rid, member: member_rid} = Agent.get(room_membership_state, & &1)
+
+          result =
+            case Hue.Bridge.fetch(HuePanel, :room, group_rid) do
+              {:ok, room} ->
+                new_children = Enum.reject(room["children"] || [], &(&1["rid"] == member_rid))
+                Hue.Resource.update(client, :room, group_rid, %{"children" => new_children})
+
+              {:error, _} = err ->
+                err
+            end
+
+          Panel.report_result(
+            ui,
+            "remove #{Panel.name(:device, member_rid)} from #{Panel.name(:room, group_rid)}",
+            result
+          )
+        end)
+      )
+
+      render_members.(:room, elem(hd(room_options), 0), room_members_frame)
+
+      block =
+        Kino.Layout.grid(
+          [room_group_select, room_device_select, room_add_button, room_remove_button, room_members_frame],
+          columns: 1
+        )
+
+      {block, %{state: room_membership_state, frame: room_members_frame}}
+    end
+
+  # ---- Rooms & zones: zone membership (lights) ----
+
+  {zone_membership_block, zone_ref} =
+    if zone_options == [] or light_options == [] do
+      {Kino.Markdown.new("*(no zones or no lights yet)*"), nil}
+    else
+      {:ok, zone_membership_state} =
+        Kino.start_child(
+          {Agent,
+           fn ->
+             %{group: elem(hd(zone_options), 0), member: elem(hd(light_options), 0)}
+           end}
+        )
+
+      register.(zone_membership_state)
+
+      zone_group_select = Kino.Input.select("Zone", zone_options)
+      zone_light_select = Kino.Input.select("Light", light_options)
+      zone_members_frame = Kino.Frame.new(placeholder: false)
+      zone_add_button = Kino.Control.button("Add to zone")
+      zone_remove_button = Kino.Control.button("Remove from zone")
+
+      register.(
+        Kino.listen(zone_group_select, fn %{value: rid} ->
+          Agent.update(zone_membership_state, &Map.put(&1, :group, rid))
+          render_members.(:zone, rid, zone_members_frame)
+        end)
+      )
+
+      register.(
+        Kino.listen(zone_light_select, fn %{value: rid} ->
+          Agent.update(zone_membership_state, &Map.put(&1, :member, rid))
+        end)
+      )
+
+      register.(
+        Kino.listen(zone_add_button, fn _ ->
+          %{group: group_rid, member: member_rid} = Agent.get(zone_membership_state, & &1)
+
+          result =
+            case Hue.Bridge.fetch(HuePanel, :zone, group_rid) do
+              {:ok, zone} ->
+                children = zone["children"] || []
+
+                if Enum.any?(children, &(&1["rid"] == member_rid)) do
+                  :ok
+                else
+                  new_children = children ++ [%{"rid" => member_rid, "rtype" => "light"}]
+                  Hue.Resource.update(client, :zone, group_rid, %{"children" => new_children})
+                end
+
+              {:error, _} = err ->
+                err
+            end
+
+          Panel.report_result(
+            ui,
+            "add #{Panel.name(:light, member_rid)} to #{Panel.name(:zone, group_rid)}",
+            result
+          )
+        end)
+      )
+
+      register.(
+        Kino.listen(zone_remove_button, fn _ ->
+          %{group: group_rid, member: member_rid} = Agent.get(zone_membership_state, & &1)
+
+          result =
+            case Hue.Bridge.fetch(HuePanel, :zone, group_rid) do
+              {:ok, zone} ->
+                new_children = Enum.reject(zone["children"] || [], &(&1["rid"] == member_rid))
+                Hue.Resource.update(client, :zone, group_rid, %{"children" => new_children})
+
+              {:error, _} = err ->
+                err
+            end
+
+          Panel.report_result(
+            ui,
+            "remove #{Panel.name(:light, member_rid)} from #{Panel.name(:zone, group_rid)}",
+            result
+          )
+        end)
+      )
+
+      render_members.(:zone, elem(hd(zone_options), 0), zone_members_frame)
+
+      block =
+        Kino.Layout.grid(
+          [zone_group_select, zone_light_select, zone_add_button, zone_remove_button, zone_members_frame],
+          columns: 1
+        )
+
+      {block, %{state: zone_membership_state, frame: zone_members_frame}}
+    end
+
+  rooms_zones_block =
+    Kino.Layout.grid(
+      [
+        Kino.Markdown.new("**Create a room or zone**"),
+        create_form,
+        Kino.Markdown.new(
+          "**Membership.** Adding a device to a room removes it from its old " <>
+            "room automatically, and the old room's scenes are rewritten to " <>
+            "drop the departed light."
+        ),
+        Kino.Markdown.new("**Rooms**"),
+        room_membership_block,
+        Kino.Markdown.new("**Zones**"),
+        zone_membership_block
+      ],
+      columns: 1
+    )
+
+  # ---- Devices: search ----
+
+  search_button = Kino.Control.button("Search for new devices")
+
+  register.(
+    Kino.listen(search_button, fn _ ->
+      # zigbee_device_discovery is a bridge singleton; a joining device
+      # announces itself on Activity like any other event — no separate UI.
+      result =
+        case Hue.Resource.list(client, :zigbee_device_discovery) do
+          {:ok, [discovery]} ->
+            Hue.Resource.update(client, :zigbee_device_discovery, discovery["id"], %{
+              "action" => %{"action_type" => "search"}
+            })
+
+          {:ok, other} ->
+            {:error, {:unexpected_zigbee_device_discovery, other}}
+
+          {:error, _} = err ->
+            err
+        end
+
+      Panel.report_result(ui, "search for new devices", result)
+    end)
+  )
+
+  Panel.render_device_status(ui)
+
+  # ---- Devices: delete ----
+
+  device_delete_block =
+    if device_options == [] do
+      Kino.Markdown.new("*(no devices)*")
+    else
+      # Type-to-confirm, not a click or checkbox: recovering an unpaired
+      # bulb can require a physical reset.
+      device_delete_form =
+        Kino.Control.form(
+          [
+            device: Kino.Input.select("Device", device_options),
+            confirm_name: Kino.Input.text("Type the device's name to confirm")
+          ],
+          submit: "Delete"
+        )
+
+      register.(
+        Kino.listen(device_delete_form, fn %{data: %{device: rid, confirm_name: typed}} ->
+          case Hue.Bridge.fetch(HuePanel, :device, rid) do
+            {:ok, device} ->
+              current_name = get_in(device, ["metadata", "name"])
+
+              if typed == current_name do
+                Panel.report_result(
+                  ui,
+                  "delete #{current_name}",
+                  Hue.Resource.delete(client, :device, rid)
+                )
+              else
+                Panel.report(ui, "delete #{current_name} — typed name did not match, refused")
+              end
+
+            {:error, _} = err ->
+              Panel.report_result(ui, "delete device", err)
+          end
+        end)
+      )
+
+      Kino.Layout.grid([device_delete_form], columns: 1)
+    end
+
+  devices_block =
+    Kino.Layout.grid(
+      [
+        Kino.Markdown.new(
+          "**Search.** New devices announce themselves on the Activity feed " <>
+            "as they join."
+        ),
+        search_button,
+        ui.device_status,
+        Kino.Markdown.new(
+          "**Delete.** Unpairs the bulb. Recovery can require physically " <>
+            "resetting it."
+        ),
+        device_delete_block
+      ],
+      columns: 1
+    )
+
+  # ---- Delete (scene/room/zone) ----
+
+  delete_options =
+    Enum.map(rooms, &{"room:#{&1["id"]}", "room: #{get_in(&1, ["metadata", "name"])}"}) ++
+      Enum.map(zones, &{"zone:#{&1["id"]}", "zone: #{get_in(&1, ["metadata", "name"])}"}) ++
+      Enum.map(scenes, &{"scene:#{&1["id"]}", "scene: #{get_in(&1, ["metadata", "name"])}"})
+
+  delete_block =
+    if delete_options == [] do
+      Kino.Markdown.new("*(nothing to delete)*")
+    else
+      delete_form =
+        Kino.Control.form(
+          [
+            resource: Kino.Input.select("Resource", delete_options),
+            confirm: Kino.Input.checkbox("Confirm delete")
+          ],
+          submit: "Delete"
+        )
+
+      register.(
+        Kino.listen(delete_form, fn %{data: %{resource: ref, confirm: confirmed}} ->
+          [type_str, rid] = String.split(ref, ":", parts: 2)
+
+          type =
+            case type_str do
+              "room" -> :room
+              "zone" -> :zone
+              "scene" -> :scene
+            end
+
+          name = Panel.name(type, rid)
+
+          if confirmed do
+            Panel.report_result(ui, "delete #{name}", Hue.Resource.delete(client, type, rid))
+          else
+            Panel.report(ui, "delete #{name} — refused, confirm not checked")
+          end
+        end)
+      )
+
+      Kino.Layout.grid([delete_form], columns: 1)
+    end
+
+  management_tab =
+    Kino.Layout.tabs([
+      {"Rename", rename_block},
+      {"Rooms & zones", rooms_zones_block},
+      {"Devices", devices_block},
+      {"Delete", delete_block}
+    ])
+
+  Kino.Frame.render(ui.management, management_tab)
+
+  Agent.update(membership_refs, fn _ -> %{room: room_ref, zone: zone_ref} end)
+end
+
+rebuild_management.()
+```
+
+```elixir
+{:ok, _router} =
+  Kino.start_child(
+    {Task,
+     fn ->
+       :ok = Hue.Bridge.subscribe(HuePanel)
+
+       Stream.repeatedly(fn -> receive do: ({:hue, e} -> e) end)
+       |> Enum.reduce([], fn event, history ->
+         history = [Panel.describe(event) | history] |> then(&Panel.render_activity(ui, &1))
+
+         if event.resource_type in [:room, :zone] and event.type in [:add, :delete] do
+           try do
+             rebuild_rooms.()
+           rescue
+             e -> Panel.report(ui, "rooms rebuild failed: #{Exception.message(e)}")
+           catch
+             :exit, reason -> Panel.report(ui, "rooms rebuild failed: #{inspect(reason)}")
+           end
+         end
+
+         if event.resource_type in [:grouped_light, :room, :zone],
+           do: Panel.render_group_states(Agent.get(group_frames_ref, & &1))
+
+         if event.resource_type == :light and event.rid == Agent.get(selected_light, & &1),
+           do: Panel.render_light_state(ui, event.rid)
+
+         if event.resource_type == :zigbee_connectivity,
+           do: Panel.render_light_state(ui, Agent.get(selected_light, & &1))
+
+         if event.resource_type == :scene and event.type in [:add, :delete] do
+           try do
+             rebuild_scenes.()
+           rescue
+             e -> Panel.report(ui, "scenes rebuild failed: #{Exception.message(e)}")
+           catch
+             :exit, reason -> Panel.report(ui, "scenes rebuild failed: #{inspect(reason)}")
+           end
+         end
+
+         if event.resource_type in [:room, :zone, :scene, :device, :light] and
+              event.type in [:add, :delete] do
+           try do
+             rebuild_management.()
+           rescue
+             e -> Panel.report(ui, "management rebuild failed: #{Exception.message(e)}")
+           catch
+             :exit, reason -> Panel.report(ui, "management rebuild failed: #{inspect(reason)}")
+           end
+         end
+
+         # Runs on every :room/:zone event, not just add/delete — a
+         # membership edit itself arrives as :update.
+         if event.resource_type in [:room, :zone] do
+           try do
+             refresh_membership.()
+           rescue
+             e -> Panel.report(ui, "membership refresh failed: #{Exception.message(e)}")
+           catch
+             :exit, reason -> Panel.report(ui, "membership refresh failed: #{inspect(reason)}")
+           end
+         end
+
+         if event.resource_type == :zigbee_device_discovery,
+           do: Panel.render_device_status(ui)
+
+         history
+       end)
+     end}
+  )
+
+:ok
+```
+
+## Panel
+
+```elixir
+Kino.Layout.tabs([
+  {"Rooms", ui.rooms},
+  {"Lights", lights_tab},
+  {"Scenes", ui.scenes},
+  {"Management", ui.management},
+  {"Activity", ui.activity}
+])
+|> then(&Kino.Layout.grid([ui.status, &1], columns: 1))
+```
